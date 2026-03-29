@@ -46,7 +46,9 @@ function validateOracleClient() {
         (f) => !fs.existsSync(path.join(clientPath, f)),
     );
     if (missing.length) {
-        logger.warn(`Missing Oracle files [${missing.join(", ")}] in ${clientPath}`);
+        logger.warn(
+            `Missing Oracle files [${missing.join(", ")}] in ${clientPath}`,
+        );
         return false;
     }
 
@@ -110,7 +112,9 @@ function _initOracleClient(db) {
     try {
         if (isValid && clientPath) {
             db.initOracleClient({ libDir: clientPath });
-            logger.info("Oracle client initialised from ORACLE_INSTANT_CLIENT.");
+            logger.info(
+                "Oracle client initialised from ORACLE_INSTANT_CLIENT.",
+            );
         } else {
             db.initOracleClient();
             logger.info("Oracle client initialised from system PATH.");
@@ -124,7 +128,9 @@ function _initOracleClient(db) {
 let oracledb;
 try {
     if (isCompiled) {
-        logger.info("Compiled exe detected — bootstrapping Oracle environment.");
+        logger.info(
+            "Compiled exe detected — bootstrapping Oracle environment.",
+        );
         _loadEnvForCompiled();
         setupOracleEnvironment();
     }
@@ -193,17 +199,31 @@ class PoolHealthMonitor {
             const conn = await pool.getConnection();
             await conn.ping();
             await conn.close();
+            // Log once when a pool recovers after failures to avoid log spam during outages
+            if (
+                !meta.healthy &&
+                meta.consecutiveFailures >= this._maxFailures
+            ) {
+                logger.info(
+                    `Pool "${name}" RECOVERED after ${meta.consecutiveFailures} consecutive failures.`,
+                );
+            }
             meta.healthy = true;
             meta.lastCheck = new Date();
             meta.consecutiveFailures = 0;
         } catch {
             meta.consecutiveFailures++;
             meta.lastCheck = new Date();
+            logger.warn(
+                `Pool "${name}" health check failed (consecutive failures: ${meta.consecutiveFailures}).`,
+            );
             if (meta.consecutiveFailures >= this._maxFailures) {
+                if (meta.healthy) {
+                    logger.error(
+                        `Pool "${name}" marked UNHEALTHY after ${this._maxFailures} failures.`,
+                    );
+                }
                 meta.healthy = false;
-                logger.error(
-                    `Pool "${name}" marked UNHEALTHY after ${this._maxFailures} failures.`,
-                );
             }
         }
     }
@@ -328,7 +348,9 @@ async function withConnection(connectionName, callback) {
         throw new TypeError("withConnection: callback must be a function.");
 
     if (!healthMonitor.isHealthy(connectionName))
-        logger.warn(`Pool "${connectionName}" is unhealthy — attempting anyway.`);
+        logger.warn(
+            `Pool "${connectionName}" is unhealthy — attempting anyway.`,
+        );
 
     const pool = await _getOrCreatePool(connectionName);
     const start = Date.now();
@@ -366,7 +388,9 @@ async function withConnection(connectionName, callback) {
             try {
                 await conn.close();
             } catch (e) {
-                logger.error(`Close failed for "${connectionName}": ${e.message}`);
+                logger.error(
+                    `Close failed for "${connectionName}": ${e.message}`,
+                );
             }
         }
     }
