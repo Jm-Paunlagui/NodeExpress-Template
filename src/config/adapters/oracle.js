@@ -25,6 +25,7 @@ const fs = require("fs");
 const path = require("path");
 const { getConnectionConfig } = require("../database");
 const { logger } = require("../../utils/logger");
+const { oracleMessages } = require("../../constants/messages");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1 — Oracle client environment  (was: oracleEnvironment.js)

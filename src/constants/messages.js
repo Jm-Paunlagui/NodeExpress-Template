@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1 — Oracle
 // ─────────────────────────────────────────────────────────────────────────────
-export const oracleMessages = {
+const oracleMessages = {
     ORACLE_INSTANT_CLIENT_NOT_SET:
         "ORACLE_INSTANT_CLIENT not set — skipping validation.",
     ORACLE_CLIENT_PATH_NOT_FOUND: (clientPath) =>
@@ -58,3 +58,5 @@ export const oracleMessages = {
     MISSING_CONFIG_FIELDS: (name, missing) =>
         `Missing config fields for \"${name}\": ${missing}`,
 };
+
+module.exports = { oracleMessages };
