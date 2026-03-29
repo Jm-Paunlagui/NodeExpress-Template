@@ -33,11 +33,11 @@ const { logger } = require("../../utils/logger");
 function validateOracleClient() {
     const clientPath = process.env.ORACLE_INSTANT_CLIENT;
     if (!clientPath) {
-        logger.warn("ORACLE_INSTANT_CLIENT not set — skipping validation.");
+        logger.warn(oracleMessages.ORACLE_INSTANT_CLIENT_NOT_SET);
         return false;
     }
     if (!fs.existsSync(clientPath)) {
-        logger.error(`Oracle client path not found: ${clientPath}`);
+        logger.error(oracleMessages.ORACLE_CLIENT_PATH_NOT_FOUND(clientPath));
         return false;
     }
 
@@ -46,13 +46,11 @@ function validateOracleClient() {
         (f) => !fs.existsSync(path.join(clientPath, f)),
     );
     if (missing.length) {
-        logger.warn(
-            `Missing Oracle files [${missing.join(", ")}] in ${clientPath}`,
-        );
+        logger.warn(oracleMessages.ORACLE_FILES_MISSING(missing, clientPath));
         return false;
     }
 
-    logger.info(`Oracle client validated: ${clientPath}`);
+    logger.info(oracleMessages.ORACLE_CLIENT_VALIDATED(clientPath));
     return true;
 }
 
@@ -205,7 +203,10 @@ class PoolHealthMonitor {
                 meta.consecutiveFailures >= this._maxFailures
             ) {
                 logger.info(
-                    `Pool "${name}" RECOVERED after ${meta.consecutiveFailures} consecutive failures.`,
+                    oracleMessages.POOL_RECOVERED(
+                        name,
+                        meta.consecutiveFailures,
+                    ),
                 );
             }
             meta.healthy = true;
@@ -215,12 +216,18 @@ class PoolHealthMonitor {
             meta.consecutiveFailures++;
             meta.lastCheck = new Date();
             logger.warn(
-                `Pool "${name}" health check failed (consecutive failures: ${meta.consecutiveFailures}).`,
+                oracleMessages.POOL_HEALTH_CHECK_FAILED(
+                    name,
+                    meta.consecutiveFailures,
+                ),
             );
             if (meta.consecutiveFailures >= this._maxFailures) {
                 if (meta.healthy) {
                     logger.error(
-                        `Pool "${name}" marked UNHEALTHY after ${this._maxFailures} failures.`,
+                        oracleMessages.POOL_MARKED_UNHEALTHY(
+                            name,
+                            this._maxFailures,
+                        ),
                     );
                 }
                 meta.healthy = false;
@@ -305,21 +312,28 @@ async function _createPool(name, dbConfig, attempt = 0) {
         await conn.ping();
         await conn.close();
 
-        logger.info(
-            `Pool "${name}" ready (min=${pool.poolMin}, max=${pool.poolMax}).`,
-        );
+        logger.info(oracleMessages.POOL_READY(name, pool));
         return pool;
     } catch (err) {
         logger.error(
-            `Pool "${name}" failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${err.message}`,
+            oracleMessages.POOL_FAILED(
+                name,
+                attempt + 1,
+                MAX_RETRIES + 1,
+                err.message,
+            ),
         );
         if (attempt < MAX_RETRIES) {
-            logger.info(`Retrying pool "${name}" in ${delay}ms…`);
+            logger.info(oracleMessages.POOL_RETRYING(name, delay));
             await _sleep(delay);
             return _createPool(name, dbConfig, attempt + 1);
         }
         throw new Error(
-            `Could not create pool "${name}" after ${MAX_RETRIES + 1} attempts: ${err.message}`,
+            oracleMessages.POOL_COULD_NOT_CREATE(
+                name,
+                MAX_RETRIES + 1,
+                err.message,
+            ),
         );
     }
 }
@@ -369,14 +383,18 @@ async function withConnection(connectionName, callback) {
         const result = await callback(conn);
         const elapsed = Date.now() - start;
         if (elapsed > 5_000)
-            logger.warn(`Slow op on "${connectionName}": ${elapsed}ms`);
+            logger.warn(oracleMessages.SLOW_OP(connectionName, elapsed));
         return result;
     } catch (err) {
         logger.error(
-            `Op failed on "${connectionName}" (${Date.now() - start}ms): ${err.message}`,
+            oracleMessages.OP_FAILED(
+                connectionName,
+                Date.now() - start,
+                err.message,
+            ),
         );
         throw Object.assign(
-            new Error(`DB op failed [${connectionName}]: ${err.message}`),
+            new Error(oracleMessages.DB_OP_FAILED(connectionName, err.message)),
             {
                 originalError: err,
                 connectionName,
@@ -389,7 +407,7 @@ async function withConnection(connectionName, callback) {
                 await conn.close();
             } catch (e) {
                 logger.error(
-                    `Close failed for "${connectionName}": ${e.message}`,
+                    oracleMessages.CLOSE_FAILED(connectionName, e.message),
                 );
             }
         }
@@ -416,7 +434,10 @@ async function withTransaction(connectionName, callback) {
                     await conn.rollback();
                 } catch (e) {
                     logger.error(
-                        `Rollback failed on "${connectionName}": ${e.message}`,
+                        oracleMessages.ROLLBACK_FAILED(
+                            connectionName,
+                            e.message,
+                        ),
                     );
                 }
             }
@@ -456,7 +477,7 @@ async function withBatchConnection(connectionName, operations) {
                     index: i,
                 });
             } catch (err) {
-                logger.error(`Batch op ${i} failed: ${err.message}`);
+                logger.error(oracleMessages.BATCH_OP_FAILED(i, err.message));
                 results.push({ success: false, error: err.message, index: i });
                 if (err.code && FATAL.has(err.code)) throw err;
             }
@@ -510,12 +531,12 @@ async function getPoolStats() {
 
 async function closeAll() {
     if (isShuttingDown) {
-        logger.warn("Shutdown already in progress.");
+        logger.warn(oracleMessages.SHUTDOWN_ALREADY);
         return;
     }
     isShuttingDown = true;
     healthMonitor.stop();
-    logger.info("Closing all Oracle pools…");
+    logger.info(oracleMessages.CLOSING_ALL_POOLS);
     const closures = [];
     for (const [name, poolPromise] of poolRegistry) {
         closures.push(
@@ -523,20 +544,22 @@ async function closeAll() {
                 poolPromise.then((p) => p.close(10)),
                 _timeout(30_000, `Shutdown timeout for "${name}"`),
             ])
-                .then(() => logger.info(`Pool "${name}" closed.`))
+                .then(() => logger.info(oracleMessages.POOL_CLOSED(name)))
                 .catch((e) =>
-                    logger.error(`Pool "${name}" close error: ${e.message}`),
+                    logger.error(
+                        oracleMessages.POOL_CLOSE_ERROR(name, e.message),
+                    ),
                 ),
         );
     }
     await Promise.allSettled(closures);
     poolRegistry.clear();
-    logger.info("All Oracle pools closed.");
+    logger.info(oracleMessages.ALL_POOLS_CLOSED);
 }
 
 ["SIGINT", "SIGTERM", "SIGQUIT"].forEach((sig) => {
     process.once(sig, async () => {
-        logger.info(`${sig} received — shutting down.`);
+        logger.info(oracleMessages.SIGNAL_RECEIVED(sig));
         try {
             await closeAll();
             process.exit(0);
@@ -546,12 +569,12 @@ async function closeAll() {
     });
 });
 process.once("uncaughtException", async (e) => {
-    logger.error("Uncaught exception", e);
+    logger.error(oracleMessages.UNCATCHED_EXCEPTION, e);
     await closeAll();
     process.exit(1);
 });
 process.once("unhandledRejection", async (r) => {
-    logger.error("Unhandled rejection", r);
+    logger.error(oracleMessages.UNHANDLED_REJECTION, r);
     await closeAll();
     process.exit(1);
 });
@@ -580,10 +603,6 @@ module.exports = {
     withConnection,
     withTransaction,
     withBatchConnection,
-
-    // Backward-compatible shorthands
-    withDbConnection: (cb) => withConnection("userAccount", cb),
-    withDbConnectionUnit: (cb) => withConnection("unitInventory", cb),
 
     // Pool management
     closeAll,
