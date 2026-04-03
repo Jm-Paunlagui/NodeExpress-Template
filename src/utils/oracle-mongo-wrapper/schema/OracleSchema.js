@@ -5,6 +5,9 @@
  */
 
 const { quoteIdentifier } = require("../utils");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 class OracleSchema {
     /**
@@ -66,7 +69,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.createTable] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.createTable", err, sql),
                 );
             }
         });
@@ -112,7 +115,7 @@ class OracleSchema {
             } else if (operation.dropConstraint) {
                 sql = `ALTER TABLE ${quoteIdentifier(tableName)} DROP CONSTRAINT ${quoteIdentifier(operation.dropConstraint)}`;
             } else {
-                throw new Error("[OracleSchema.alterTable] Unknown operation.");
+                throw new Error(MSG.SCHEMA_ALTER_TABLE_UNKNOWN_OP);
             }
 
             try {
@@ -120,7 +123,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.alterTable] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.alterTable", err, sql),
                 );
             }
         });
@@ -148,7 +151,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.dropTable] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.dropTable", err, sql),
                 );
             }
         });
@@ -167,7 +170,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.truncateTable] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.truncateTable", err, sql),
                 );
             }
         });
@@ -187,7 +190,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.renameTable] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.renameTable", err, sql),
                 );
             }
         });
@@ -215,9 +218,7 @@ class OracleSchema {
                 selectSql = built.sql;
                 binds = built.binds;
             } else {
-                throw new Error(
-                    "[OracleSchema.createView] Expected a QueryBuilder or SQL string.",
-                );
+                throw new Error(MSG.SCHEMA_CREATE_VIEW_INVALID_INPUT);
             }
 
             let prefix = "CREATE";
@@ -231,7 +232,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.createView] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.createView", err, sql),
                 );
             }
         });
@@ -256,7 +257,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.dropView] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.dropView", err, sql),
                 );
             }
         });
@@ -290,7 +291,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.createSequence] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.createSequence", err, sql),
                 );
             }
         });
@@ -309,7 +310,7 @@ class OracleSchema {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleSchema.createSchema] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleSchema.createSchema", err, sql),
                 );
             }
         });

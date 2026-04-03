@@ -108,9 +108,12 @@ function buildPivot(tableName, spec) {
         .map(quoteIdentifier)
         .join(", ");
 
-    // Build pivot IN clause
+    // Build pivot IN clause — sanitize values (PIVOT IN cannot use bind variables)
     const pivotIn = pivotValues
-        .map((v) => `'${v}' AS ${quoteIdentifier(v)}`)
+        .map((v) => {
+            const safe = String(v).replace(/'/g, "''");
+            return `'${safe}' AS ${quoteIdentifier(v)}`;
+        })
         .join(", ");
 
     const sql = `SELECT * FROM (SELECT ${innerCols} FROM ${quoteIdentifier(tableName)}) PIVOT (${aggFn}(${quoteIdentifier(field)}) FOR ${quoteIdentifier(pivotOn)} IN (${pivotIn}))`;

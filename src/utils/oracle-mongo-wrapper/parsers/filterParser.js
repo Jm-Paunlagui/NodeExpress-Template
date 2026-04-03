@@ -6,23 +6,28 @@
  */
 
 const { quoteIdentifier } = require("../utils");
-
-let _bindCounter = 0;
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 /**
- * Generate a unique bind variable name.
- * @param {string} prefix
- * @returns {string}
+ * Per-call bind counter to avoid global mutable state (thread-safe under concurrency).
+ * @returns {{ next: (prefix: string) => string }}
  */
-function _bindName(prefix) {
-    return `${prefix}_${_bindCounter++}`;
+function _createCounter() {
+    let _count = 0;
+    return {
+        next(prefix) {
+            return `${prefix}_${_count++}`;
+        },
+    };
 }
 
 /**
- * Reset bind counter (useful for testing determinism).
+ * Reset bind counter (no-op — counters are now per-call; kept for API compat).
  */
 function resetBindCounter() {
-    _bindCounter = 0;
+    // no-op: counters are scoped per parseFilter call
 }
 
 const COMPARISON_OPS = {
@@ -40,9 +45,10 @@ const COMPARISON_OPS = {
  * @param {*} expr - Operator expression or scalar value
  * @param {Object} binds - Accumulator for bind variables
  * @param {string} outerAlias - Optional table alias for correlated subqueries
+ * @param {Object} counter - Per-call bind counter
  * @returns {string} SQL condition fragment
  */
-function _parseFieldExpr(field, expr, binds, outerAlias) {
+function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
     const qField = quoteIdentifier(field);
 
     // Simple equality: { field: value }
@@ -60,7 +66,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
             const outerCol = expr.slice(7);
             return `${qField} = ${quoteIdentifier(outerCol)}`;
         }
-        const bname = _bindName(`where_${field}`);
+        const bname = counter.next(`where_${field}`);
         binds[bname] = expr;
         return `${qField} = :${bname}`;
     }
@@ -83,10 +89,11 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                     val.$subquery,
                     binds,
                     outerAlias,
+                    counter,
                 );
                 conditions.push(`${qField} ${COMPARISON_OPS[op]} ${subExpr}`);
             } else {
-                const bname = _bindName(`where_${field}`);
+                const bname = counter.next(`where_${field}`);
                 binds[bname] = val;
                 conditions.push(`${qField} ${COMPARISON_OPS[op]} :${bname}`);
             }
@@ -95,7 +102,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                 conditions.push("1=0"); // empty IN → always false
             } else {
                 const placeholders = val.map((v) => {
-                    const bname = _bindName(`where_${field}`);
+                    const bname = counter.next(`where_${field}`);
                     binds[bname] = v;
                     return `:${bname}`;
                 });
@@ -106,7 +113,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                 conditions.push("1=1");
             } else {
                 const placeholders = val.map((v) => {
-                    const bname = _bindName(`where_${field}`);
+                    const bname = counter.next(`where_${field}`);
                     binds[bname] = v;
                     return `:${bname}`;
                 });
@@ -115,14 +122,14 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                 );
             }
         } else if (op === "$between") {
-            const bmin = _bindName(`where_${field}_min`);
-            const bmax = _bindName(`where_${field}_max`);
+            const bmin = counter.next(`where_${field}_min`);
+            const bmax = counter.next(`where_${field}_max`);
             binds[bmin] = val[0];
             binds[bmax] = val[1];
             conditions.push(`${qField} BETWEEN :${bmin} AND :${bmax}`);
         } else if (op === "$notBetween") {
-            const bmin = _bindName(`where_${field}_min`);
-            const bmax = _bindName(`where_${field}_max`);
+            const bmin = counter.next(`where_${field}_min`);
+            const bmax = counter.next(`where_${field}_max`);
             binds[bmin] = val[0];
             binds[bmax] = val[1];
             conditions.push(`${qField} NOT BETWEEN :${bmin} AND :${bmax}`);
@@ -131,23 +138,23 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                 val ? `${qField} IS NOT NULL` : `${qField} IS NULL`,
             );
         } else if (op === "$regex") {
-            const bname = _bindName(`where_${field}`);
+            const bname = counter.next(`where_${field}`);
             binds[bname] = val;
             conditions.push(`REGEXP_LIKE(${qField}, :${bname})`);
         } else if (op === "$like") {
-            const bname = _bindName(`where_${field}`);
+            const bname = counter.next(`where_${field}`);
             binds[bname] = val;
             conditions.push(`${qField} LIKE :${bname}`);
         } else if (op === "$any") {
             const placeholders = val.map((v) => {
-                const bname = _bindName(`where_${field}`);
+                const bname = counter.next(`where_${field}`);
                 binds[bname] = v;
                 return `:${bname}`;
             });
             conditions.push(`${qField} = ANY(${placeholders.join(", ")})`);
         } else if (op === "$all") {
             const placeholders = val.map((v) => {
-                const bname = _bindName(`where_${field}`);
+                const bname = counter.next(`where_${field}`);
                 binds[bname] = v;
                 return `:${bname}`;
             });
@@ -157,9 +164,11 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
             const whenParts = val.map((c) => {
                 const { whereClause: wWhen, binds: wBinds } = parseFilter(
                     c.when,
+                    null,
+                    counter,
                 );
                 Object.assign(binds, wBinds);
-                const bThen = _bindName(`where_${field}_then`);
+                const bThen = counter.next(`where_${field}_then`);
                 binds[bThen] = c.then;
                 const condStr = wWhen.replace(/^WHERE\s+/i, "");
                 return `WHEN ${condStr} THEN :${bThen}`;
@@ -167,7 +176,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
             const elseVal = expr.$else;
             let elseStr = "";
             if (elseVal !== undefined) {
-                const bElse = _bindName(`where_${field}_else`);
+                const bElse = counter.next(`where_${field}_else`);
                 binds[bElse] = elseVal;
                 elseStr = ` ELSE :${bElse}`;
             }
@@ -177,7 +186,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
         } else if (op === "$coalesce") {
             const parts = val.map((v) => {
                 if (typeof v === "string" && !v.startsWith("$")) {
-                    const bname = _bindName(`where_${field}`);
+                    const bname = counter.next(`where_${field}`);
                     binds[bname] = v;
                     return `:${bname}`;
                 }
@@ -189,13 +198,19 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
             conditions.push(`COALESCE(${parts.join(", ")})`);
         } else if (op === "$nullif") {
             const left = quoteIdentifier(val[0]);
-            const bname = _bindName(`where_${field}`);
+            const bname = counter.next(`where_${field}`);
             binds[bname] = val[1];
             conditions.push(`NULLIF(${left}, :${bname})`);
         } else if (op === "$subquery") {
             // Correlated subquery for WHERE comparisons
             conditions.push(
-                _buildCorrelatedSubquery(field, val, binds, outerAlias),
+                _buildCorrelatedSubquery(
+                    field,
+                    val,
+                    binds,
+                    outerAlias,
+                    counter,
+                ),
             );
         } else if (op === "$inSelect") {
             // val can be a QueryBuilder, a resolved Array, or raw SQL string
@@ -205,7 +220,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                     conditions.push("1=0");
                 } else {
                     const placeholders = val.map((v) => {
-                        const bname = _bindName(`where_${field}`);
+                        const bname = counter.next(`where_${field}`);
                         binds[bname] = v;
                         return `:${bname}`;
                     });
@@ -249,7 +264,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
                 `${qField} ${cmpMap[cmpOp]} ALL (SELECT ${subField} FROM ${subCollection})`,
             );
         } else {
-            throw new Error(`[filterParser] Unsupported operator: ${op}`);
+            throw new Error(MSG.FILTER_UNSUPPORTED_OPERATOR(op));
         }
     }
 
@@ -261,7 +276,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias) {
 /**
  * Build a correlated scalar subquery for use in WHERE comparisons.
  */
-function _buildCorrelatedSubquery(field, spec, binds, outerAlias) {
+function _buildCorrelatedSubquery(field, spec, binds, outerAlias, counter) {
     const collection = quoteIdentifier(spec.collection);
     const aggFn = spec.aggregate
         ? spec.aggregate.replace("$", "").toUpperCase()
@@ -284,7 +299,7 @@ function _buildCorrelatedSubquery(field, spec, binds, outerAlias) {
                     `${quoteIdentifier(k)} = ${alias}.${quoteIdentifier(outerCol)}`,
                 );
             } else {
-                const bname = _bindName(`where_sub_${k}`);
+                const bname = counter.next(`where_sub_${k}`);
                 binds[bname] = v;
                 subconditions.push(`${quoteIdentifier(k)} = :${bname}`);
             }
@@ -300,9 +315,10 @@ function _buildCorrelatedSubquery(field, spec, binds, outerAlias) {
  *
  * @param {Object} filter - MongoDB-style filter, e.g. { status: 'active', age: { $gte: 18 } }
  * @param {string} [tableAlias] - Optional alias for the main table (for correlated subqueries)
+ * @param {Object} [_counter] - Internal: shared counter for recursive calls (do not pass externally)
  * @returns {{ whereClause: string, binds: Object }}
  */
-function parseFilter(filter, tableAlias) {
+function parseFilter(filter, tableAlias, _counter) {
     if (
         !filter ||
         typeof filter !== "object" ||
@@ -310,6 +326,9 @@ function parseFilter(filter, tableAlias) {
     ) {
         return { whereClause: "", binds: {} };
     }
+
+    // Create counter once at the top-level call; reuse for recursive calls
+    const counter = _counter || _createCounter();
 
     const binds = {};
     const conditions = [];
@@ -320,6 +339,7 @@ function parseFilter(filter, tableAlias) {
                 const { whereClause: wc, binds: wb } = parseFilter(
                     sub,
                     tableAlias,
+                    counter,
                 );
                 Object.assign(binds, wb);
                 return wc.replace(/^WHERE\s+/i, "");
@@ -330,6 +350,7 @@ function parseFilter(filter, tableAlias) {
                 const { whereClause: wc, binds: wb } = parseFilter(
                     sub,
                     tableAlias,
+                    counter,
                 );
                 Object.assign(binds, wb);
                 return wc.replace(/^WHERE\s+/i, "");
@@ -340,6 +361,7 @@ function parseFilter(filter, tableAlias) {
                 const { whereClause: wc, binds: wb } = parseFilter(
                     sub,
                     tableAlias,
+                    counter,
                 );
                 Object.assign(binds, wb);
                 return wc.replace(/^WHERE\s+/i, "");
@@ -349,6 +371,7 @@ function parseFilter(filter, tableAlias) {
             const { whereClause: wc, binds: wb } = parseFilter(
                 value,
                 tableAlias,
+                counter,
             );
             Object.assign(binds, wb);
             conditions.push(`NOT (${wc.replace(/^WHERE\s+/i, "")})`);
@@ -364,7 +387,7 @@ function parseFilter(filter, tableAlias) {
                         `${quoteIdentifier(mk)} = ${alias}.${quoteIdentifier(outerCol)}`,
                     );
                 } else {
-                    const bname = _bindName(`where_exists_${mk}`);
+                    const bname = counter.next(`where_exists_${mk}`);
                     binds[bname] = mv;
                     matchParts.push(`${quoteIdentifier(mk)} = :${bname}`);
                 }
@@ -385,7 +408,7 @@ function parseFilter(filter, tableAlias) {
                         `${quoteIdentifier(mk)} = ${alias}.${quoteIdentifier(outerCol)}`,
                     );
                 } else {
-                    const bname = _bindName(`where_notexists_${mk}`);
+                    const bname = counter.next(`where_notexists_${mk}`);
                     binds[bname] = mv;
                     matchParts.push(`${quoteIdentifier(mk)} = :${bname}`);
                 }
@@ -398,7 +421,9 @@ function parseFilter(filter, tableAlias) {
                 `NOT EXISTS (SELECT 1 FROM ${subColl}${matchWhere})`,
             );
         } else {
-            conditions.push(_parseFieldExpr(key, value, binds, tableAlias));
+            conditions.push(
+                _parseFieldExpr(key, value, binds, tableAlias, counter),
+            );
         }
     }
 

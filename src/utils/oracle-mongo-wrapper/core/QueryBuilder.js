@@ -12,6 +12,9 @@ const {
     rowToDoc,
 } = require("../utils");
 const { parseFilter } = require("../parsers/filterParser");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 class QueryBuilder {
     /**
@@ -38,9 +41,7 @@ class QueryBuilder {
 
     _checkTerminated() {
         if (this._terminated) {
-            throw new Error(
-                "Cannot chain after terminal method has been called.",
-            );
+            throw new Error(MSG.QUERY_BUILDER_CHAIN_AFTER_TERMINAL);
         }
     }
 
@@ -255,7 +256,7 @@ class QueryBuilder {
             try {
                 const result = await conn.execute(sql, binds, {
                     outFormat: self.db.oracledb.OUT_FORMAT_OBJECT,
-                    autoCommit: true,
+                    autoCommit: !self._conn,
                 });
                 let rows = result.rows || [];
 
@@ -274,7 +275,7 @@ class QueryBuilder {
                 return rows;
             } catch (err) {
                 throw new Error(
-                    `[QueryBuilder._execute] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("QueryBuilder._execute", err, sql, binds),
                 );
             }
         };
@@ -297,14 +298,47 @@ class QueryBuilder {
     }
 
     /**
-     * Execute and call fn for each row.
+     * Execute and call fn for each row using queryStream (O(1) memory).
      * @param {Function} fn
      * @returns {Promise<void>}
      */
     async forEach(fn) {
         this._terminated = true;
-        const rows = await this._execute();
-        for (const row of rows) fn(row);
+        await this._resolveFilterPromises();
+        const { sql, binds } = this._buildSQL();
+        const self = this;
+        const proj = buildProjection(self._projection);
+
+        const run = (conn) =>
+            new Promise((resolve, reject) => {
+                const stream = conn.queryStream(sql, binds, {
+                    outFormat: self.db.oracledb.OUT_FORMAT_OBJECT,
+                });
+                stream.on("data", (row) => {
+                    if (proj.isExclusion && proj.excludedCols.length > 0) {
+                        for (const col of proj.excludedCols) delete row[col];
+                    }
+                    fn(row);
+                });
+                stream.on("error", (err) => {
+                    reject(
+                        new Error(
+                            MSG.wrapError(
+                                "QueryBuilder.forEach",
+                                err,
+                                sql,
+                                binds,
+                            ),
+                        ),
+                    );
+                });
+                stream.on("end", resolve);
+            });
+
+        if (this._conn) {
+            return run(this._conn);
+        }
+        return this.db.withConnection(run);
     }
 
     /**
@@ -351,7 +385,7 @@ class QueryBuilder {
                 return Number(result.rows[0].CNT);
             } catch (err) {
                 throw new Error(
-                    `[QueryBuilder.count] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("QueryBuilder.count", err, sql, binds),
                 );
             }
         };

@@ -9,6 +9,9 @@ const { quoteIdentifier, mergeBinds, rowToDoc } = require("../utils");
 const { parseFilter } = require("../parsers/filterParser");
 const { parseUpdate } = require("../parsers/updateParser");
 const { QueryBuilder } = require("./QueryBuilder");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 class OracleCollection {
     /**
@@ -73,7 +76,7 @@ class OracleCollection {
                 return result.rows[0] ?? null;
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.findOne] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.findOne", err, sql, binds),
                 );
             }
         });
@@ -143,7 +146,11 @@ class OracleCollection {
                 });
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.findOneAndUpdate] ${err.message}\nSQL: ${updateSql}`,
+                    MSG.wrapError(
+                        "OracleCollection.findOneAndUpdate",
+                        err,
+                        updateSql,
+                    ),
                 );
             }
 
@@ -187,7 +194,11 @@ class OracleCollection {
                 });
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.findOneAndDelete] ${err.message}\nSQL: ${deleteSql}`,
+                    MSG.wrapError(
+                        "OracleCollection.findOneAndDelete",
+                        err,
+                        deleteSql,
+                    ),
                 );
             }
             return doc;
@@ -231,7 +242,11 @@ class OracleCollection {
                 });
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.findOneAndReplace] ${err.message}\nSQL: ${updateSql}`,
+                    MSG.wrapError(
+                        "OracleCollection.findOneAndReplace",
+                        err,
+                        updateSql,
+                    ),
                 );
             }
 
@@ -266,7 +281,12 @@ class OracleCollection {
                 return Number(result.rows[0].CNT);
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.countDocuments] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.countDocuments",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -291,7 +311,11 @@ class OracleCollection {
                 return Number(result.rows[0]?.NUM_ROWS ?? 0);
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.estimatedDocumentCount] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.estimatedDocumentCount",
+                        err,
+                        sql,
+                    ),
                 );
             }
         });
@@ -315,7 +339,7 @@ class OracleCollection {
                 return result.rows.map((r) => r[field]);
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.distinct] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.distinct", err, sql, binds),
                 );
             }
         });
@@ -405,7 +429,12 @@ class OracleCollection {
                 return response;
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.insertOne] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.insertOne",
+                        err,
+                        sql,
+                        allBinds,
+                    ),
                 );
             }
         });
@@ -418,9 +447,7 @@ class OracleCollection {
      */
     async insertMany(documents) {
         if (!Array.isArray(documents) || documents.length === 0) {
-            throw new Error(
-                "[OracleCollection.insertMany] Documents array must not be empty.",
-            );
+            throw new Error(MSG.INSERT_MANY_EMPTY);
         }
 
         return this.db.withTransaction(async (conn) => {
@@ -488,7 +515,7 @@ class OracleCollection {
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.insertMany] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.insertMany", err, sql),
                 );
             }
         });
@@ -504,54 +531,8 @@ class OracleCollection {
      * @returns {Promise<{ acknowledged, matchedCount, modifiedCount, returning? }>}
      */
     async updateOne(filter, update, options = {}) {
-        // Validate update object early — fail fast if empty/invalid
-        if (!options.upsert) {
-            parseUpdate(update);
-        }
-
         return this._execute(async (conn) => {
             const { whereClause, binds: filterBinds } = parseFilter(filter);
-
-            // Check if any rows match
-            const countSql = `SELECT COUNT(*) AS CNT FROM ${quoteIdentifier(this.tableName)} ${whereClause}`;
-            const countResult = await conn.execute(countSql, filterBinds, {
-                outFormat: this.db.oracledb.OUT_FORMAT_OBJECT,
-            });
-            const matchedCount = Number(countResult.rows[0].CNT);
-
-            if (matchedCount === 0 && options.upsert) {
-                // Upsert: insert
-                const fields = {};
-                if (update.$set) Object.assign(fields, update.$set);
-                for (const [k, v] of Object.entries(filter)) {
-                    if (typeof v !== "object") fields[k] = v;
-                }
-                const cols = Object.keys(fields);
-                const vals = cols.map((_, i) => `:v${i}`);
-                const insertBinds = {};
-                cols.forEach((c, i) => {
-                    insertBinds[`v${i}`] = fields[c];
-                });
-                const insertSql = `INSERT INTO ${quoteIdentifier(this.tableName)} (${cols.map(quoteIdentifier).join(", ")}) VALUES (${vals.join(", ")})`;
-                await conn.execute(insertSql, insertBinds, {
-                    autoCommit: !this._conn,
-                });
-                return {
-                    acknowledged: true,
-                    matchedCount: 0,
-                    modifiedCount: 0,
-                    upsertedCount: 1,
-                };
-            }
-
-            if (matchedCount === 0) {
-                return {
-                    acknowledged: true,
-                    matchedCount: 0,
-                    modifiedCount: 0,
-                };
-            }
-
             const { setClause, binds: updateBinds } = parseUpdate(update);
             const allBinds = mergeBinds(filterBinds, updateBinds);
 
@@ -577,9 +558,35 @@ class OracleCollection {
                 const result = await conn.execute(sql, finalBinds, {
                     autoCommit: !this._conn,
                 });
+
+                if (result.rowsAffected === 0 && options.upsert) {
+                    // Upsert: insert
+                    const fields = {};
+                    if (update.$set) Object.assign(fields, update.$set);
+                    for (const [k, v] of Object.entries(filter)) {
+                        if (typeof v !== "object") fields[k] = v;
+                    }
+                    const cols = Object.keys(fields);
+                    const vals = cols.map((_, i) => `:v${i}`);
+                    const insertBinds = {};
+                    cols.forEach((c, i) => {
+                        insertBinds[`v${i}`] = fields[c];
+                    });
+                    const insertSql = `INSERT INTO ${quoteIdentifier(this.tableName)} (${cols.map(quoteIdentifier).join(", ")}) VALUES (${vals.join(", ")})`;
+                    await conn.execute(insertSql, insertBinds, {
+                        autoCommit: !this._conn,
+                    });
+                    return {
+                        acknowledged: true,
+                        matchedCount: 0,
+                        modifiedCount: 0,
+                        upsertedCount: 1,
+                    };
+                }
+
                 const response = {
                     acknowledged: true,
-                    matchedCount: Math.min(matchedCount, 1),
+                    matchedCount: result.rowsAffected > 0 ? 1 : 0,
                     modifiedCount: result.rowsAffected,
                 };
                 if (returningCols.length > 0 && result.outBinds) {
@@ -594,7 +601,12 @@ class OracleCollection {
                 return response;
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.updateOne] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.updateOne",
+                        err,
+                        sql,
+                        finalBinds,
+                    ),
                 );
             }
         });
@@ -608,20 +620,10 @@ class OracleCollection {
      * @returns {Promise<{ acknowledged, matchedCount, modifiedCount }>}
      */
     async updateMany(filter, update, options = {}) {
-        // Validate update object early
-        parseUpdate(update);
-
         return this._execute(async (conn) => {
             const { whereClause, binds: filterBinds } = parseFilter(filter);
             const { setClause, binds: updateBinds } = parseUpdate(update);
             const allBinds = mergeBinds(filterBinds, updateBinds);
-
-            // Count matches first
-            const countSql = `SELECT COUNT(*) AS CNT FROM ${quoteIdentifier(this.tableName)} ${whereClause}`;
-            const countResult = await conn.execute(countSql, filterBinds, {
-                outFormat: this.db.oracledb.OUT_FORMAT_OBJECT,
-            });
-            const matchedCount = Number(countResult.rows[0].CNT);
 
             const sql = `UPDATE ${quoteIdentifier(this.tableName)} ${setClause} ${whereClause}`;
             try {
@@ -630,12 +632,17 @@ class OracleCollection {
                 });
                 return {
                     acknowledged: true,
-                    matchedCount,
+                    matchedCount: result.rowsAffected,
                     modifiedCount: result.rowsAffected,
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.updateMany] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.updateMany",
+                        err,
+                        sql,
+                        allBinds,
+                    ),
                 );
             }
         });
@@ -674,7 +681,12 @@ class OracleCollection {
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.replaceOne] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.replaceOne",
+                        err,
+                        sql,
+                        allBinds,
+                    ),
                 );
             }
         });
@@ -687,9 +699,7 @@ class OracleCollection {
      */
     async bulkWrite(operations) {
         if (!Array.isArray(operations) || operations.length === 0) {
-            throw new Error(
-                "[OracleCollection.bulkWrite] Operations must be a non-empty array.",
-            );
+            throw new Error(MSG.BULK_WRITE_EMPTY);
         }
 
         return this.db.withTransaction(async (conn) => {
@@ -741,9 +751,7 @@ class OracleCollection {
                         ),
                     );
                 } else {
-                    throw new Error(
-                        `[OracleCollection.bulkWrite] Unknown operation type: ${JSON.stringify(Object.keys(op))}`,
-                    );
+                    throw new Error(MSG.BULK_WRITE_UNKNOWN_OP(Object.keys(op)));
                 }
             }
 
@@ -800,7 +808,12 @@ class OracleCollection {
                 return response;
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.deleteOne] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.deleteOne",
+                        err,
+                        sql,
+                        allBinds,
+                    ),
                 );
             }
         });
@@ -825,7 +838,12 @@ class OracleCollection {
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.deleteMany] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.deleteMany",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -843,7 +861,7 @@ class OracleCollection {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.drop] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.drop", err, sql),
                 );
             }
         });
@@ -876,7 +894,12 @@ class OracleCollection {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.aggregate] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.aggregate",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -914,7 +937,7 @@ class OracleCollection {
                 return { acknowledged: true, indexName };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.createIndex] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.createIndex", err, sql),
                 );
             }
         });
@@ -950,7 +973,7 @@ class OracleCollection {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.dropIndex] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.dropIndex", err, sql),
                 );
             }
         });
@@ -1106,7 +1129,7 @@ class OracleCollection {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.merge] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.merge", err, sql, srcBinds),
                 );
             }
         });
@@ -1150,7 +1173,12 @@ class OracleCollection {
                 return { acknowledged: true };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.mergeFrom] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.mergeFrom",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -1176,7 +1204,12 @@ class OracleCollection {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.connectBy] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.connectBy",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -1200,7 +1233,7 @@ class OracleCollection {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.pivot] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.pivot", err, sql, binds),
                 );
             }
         });
@@ -1224,7 +1257,7 @@ class OracleCollection {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.unpivot] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.unpivot", err, sql, binds),
                 );
             }
         });
@@ -1324,7 +1357,12 @@ class OracleCollection {
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.insertFromQuery] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError(
+                        "OracleCollection.insertFromQuery",
+                        err,
+                        sql,
+                        binds,
+                    ),
                 );
             }
         });
@@ -1393,7 +1431,7 @@ class OracleCollection {
                 };
             } catch (err) {
                 throw new Error(
-                    `[OracleCollection.updateFromJoin] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("OracleCollection.updateFromJoin", err, sql),
                 );
             }
         });

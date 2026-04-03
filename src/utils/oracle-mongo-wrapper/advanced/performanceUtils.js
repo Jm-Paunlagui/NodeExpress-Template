@@ -6,6 +6,32 @@
  */
 
 const { quoteIdentifier } = require("../utils");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
+
+/**
+ * Oracle error codes that indicate missing privileges or inaccessible objects.
+ */
+const PRIVILEGE_ERROR_CODES = [1031, 942, 1039, 1219, 12003];
+
+/**
+ * Wrap an Oracle error with a helpful privilege message when the error
+ * is caused by missing DBA/admin privileges.
+ * @param {string} method - Method name for context
+ * @param {Error} err - Original error
+ * @param {string} sql - SQL that was attempted
+ * @param {string} requiredPrivilege - Description of the required privilege
+ */
+function _wrapPrivilegeError(method, err, sql, requiredPrivilege) {
+    const code = err.errorNum || err.code;
+    if (PRIVILEGE_ERROR_CODES.includes(code)) {
+        throw new Error(
+            MSG.INSUFFICIENT_PRIVILEGES(method, requiredPrivilege, err, sql),
+        );
+    }
+    throw new Error(MSG.wrapError(method, err, sql));
+}
 
 /**
  * Create a performance utility instance bound to a db interface.
@@ -34,9 +60,7 @@ function createPerformance(db) {
                     sql = built.sql;
                     binds = built.binds;
                 } else {
-                    throw new Error(
-                        "[performance.explainPlan] Expected a QueryBuilder or SQL string.",
-                    );
+                    throw new Error(MSG.PERF_EXPLAIN_PLAN_INVALID_INPUT);
                 }
 
                 // EXPLAIN PLAN FOR ...
@@ -55,8 +79,11 @@ function createPerformance(db) {
                     );
                     return planResult.rows || [];
                 } catch (err) {
-                    throw new Error(
-                        `[performance.explainPlan] ${err.message}\nSQL: ${explainSql}`,
+                    _wrapPrivilegeError(
+                        "performance.explainPlan",
+                        err,
+                        explainSql,
+                        MSG.PRIV_PLAN_TABLE,
                     );
                 }
             });
@@ -77,8 +104,11 @@ function createPerformance(db) {
                         { autoCommit: true },
                     );
                 } catch (err) {
-                    throw new Error(
-                        `[performance.analyze] ${err.message}\nSQL: ${sql}`,
+                    _wrapPrivilegeError(
+                        "performance.analyze",
+                        err,
+                        sql,
+                        MSG.PRIV_DBMS_STATS,
                     );
                 }
             });
@@ -106,9 +136,7 @@ function createPerformance(db) {
                     selectSql = built.sql;
                     binds = built.binds;
                 } else {
-                    throw new Error(
-                        "[performance.createMaterializedView] Expected a QueryBuilder or SQL string.",
-                    );
+                    throw new Error(MSG.PERF_CREATE_MVIEW_INVALID_INPUT);
                 }
 
                 const {
@@ -157,8 +185,11 @@ function createPerformance(db) {
                     await conn.execute(sql, binds, { autoCommit: true });
                     return { acknowledged: true };
                 } catch (err) {
-                    throw new Error(
-                        `[performance.createMaterializedView] ${err.message}\nSQL: ${sql}`,
+                    _wrapPrivilegeError(
+                        "performance.createMaterializedView",
+                        err,
+                        sql,
+                        MSG.PRIV_CREATE_MVIEW,
                     );
                 }
             });
@@ -182,8 +213,11 @@ function createPerformance(db) {
                         { autoCommit: true },
                     );
                 } catch (err) {
-                    throw new Error(
-                        `[performance.refreshMaterializedView] ${err.message}\nSQL: ${sql}`,
+                    _wrapPrivilegeError(
+                        "performance.refreshMaterializedView",
+                        err,
+                        sql,
+                        MSG.PRIV_REFRESH_MVIEW,
                     );
                 }
             });
@@ -201,8 +235,11 @@ function createPerformance(db) {
                     await conn.execute(sql, {}, { autoCommit: true });
                     return { acknowledged: true };
                 } catch (err) {
-                    throw new Error(
-                        `[performance.dropMaterializedView] ${err.message}\nSQL: ${sql}`,
+                    _wrapPrivilegeError(
+                        "performance.dropMaterializedView",
+                        err,
+                        sql,
+                        MSG.PRIV_DROP_MVIEW,
                     );
                 }
             });

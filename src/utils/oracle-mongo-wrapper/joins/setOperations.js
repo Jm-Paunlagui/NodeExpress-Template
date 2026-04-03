@@ -5,6 +5,9 @@
  */
 
 const { quoteIdentifier } = require("../utils");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 /**
  * Wraps two QueryBuilder instances with a set operator.
@@ -26,9 +29,7 @@ class SetResultBuilder {
                 (k) => qb2._projection[k] === 1,
             ).length;
             if (count1 !== count2) {
-                throw new Error(
-                    "[SetResultBuilder] Column counts differ between queries",
-                );
+                throw new Error(MSG.SET_OP_COLUMN_COUNT_MISMATCH);
             }
         }
         this._qb1 = qb1;
@@ -143,7 +144,7 @@ class SetResultBuilder {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[SetResultBuilder.toArray] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("SetResultBuilder.toArray", err, sql),
                 );
             }
         };

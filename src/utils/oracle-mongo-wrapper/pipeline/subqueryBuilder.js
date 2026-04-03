@@ -38,16 +38,16 @@ function buildScalarSubquery(spec, outerAlias = "t0") {
             aggExpr = "COUNT(*)";
             break;
         case "SUM":
-            aggExpr = `SUM(${quoteIdentifier(field || col)})`;
+            aggExpr = `SUM(${quoteIdentifier(field)})`;
             break;
         case "AVG":
-            aggExpr = `AVG(${quoteIdentifier(field || col)})`;
+            aggExpr = `AVG(${quoteIdentifier(field)})`;
             break;
         case "MIN":
-            aggExpr = `MIN(${quoteIdentifier(field || col)})`;
+            aggExpr = `MIN(${quoteIdentifier(field)})`;
             break;
         case "MAX":
-            aggExpr = `MAX(${quoteIdentifier(field || col)})`;
+            aggExpr = `MAX(${quoteIdentifier(field)})`;
             break;
         default:
             aggExpr = "COUNT(*)";

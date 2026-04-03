@@ -4,6 +4,8 @@
  * @fileoverview Shared helpers for the oracle-mongo-wrapper library.
  */
 
+const { oracleMongoWrapperMessages: MSG } = require("../../constants/messages");
+
 /**
  * Wrap an identifier in double quotes to handle Oracle reserved words and case sensitivity.
  * @param {string} name - Column or table name
@@ -57,9 +59,7 @@ function mergeBinds(a, b) {
     const merged = { ...a };
     for (const [k, v] of Object.entries(b)) {
         if (k in merged) {
-            throw new Error(
-                `Bind key collision: "${k}" exists in both bind objects.`,
-            );
+            throw new Error(MSG.MERGE_BINDS_KEY_COLLISION(k));
         }
         merged[k] = v;
     }

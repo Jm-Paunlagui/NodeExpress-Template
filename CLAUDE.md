@@ -1,1472 +1,782 @@
-# 🚀 FINAL PROMPT — Oracle MongoDB-Style Wrapper Library (Node.js)
+# Oracle MongoDB-Style Wrapper — Final Build Specification (Node.js)
+
+You are an expert Node.js + OracleDB engineer. Build a **production-grade, reusable OracleDB wrapper library** in Node.js using the `oracledb` package that mirrors MongoDB's core API while leveraging full Oracle SQL capability.
 
 ---
 
-You are an expert Node.js and OracleDB developer. Build a **production-grade, fully tested, reusable OracleDB wrapper library** written in Node.js using the `oracledb` npm package. The library must mirror MongoDB's core API as closely as possible while leveraging the full power of Oracle SQL.
+## ⚠️ PART 1 — GLOBAL CONSTRAINTS
+> Read this section fully before writing a single line of code. Every rule here applies to every file in the project without exception.
+
+### 1.1 — No Pool Management
+
+This library lives inside an existing Express/OracleDB backend. The pool manager already exists at:
+
+```
+src/config/adapters/oracle.js  ← withConnection, withTransaction, withBatchConnection,
+                                  closeAll, getPoolStats, isPoolHealthy, retry, shutdown
+src/config/database.js         ← Named connection registry ('userAccount', 'unitInventory', …)
+src/config/index.js            ← Barrel re-export of the above
+```
+
+**Never recreate, wrap, or shadow any of these files.**
+
+The adapter exposes:
+```js
+const { withConnection, withTransaction, withBatchConnection,
+        closeAll, getPoolStats, isPoolHealthy, oracledb } = require('./src/config');
+```
+
+### 1.2 — Connection Dispatch Rules
+
+Define this dispatcher **once** inside `OracleCollection` and reuse it everywhere:
+
+```js
+_execute(fn) {
+  return this._conn ? fn(this._conn) : this.db.withConnection(fn);
+}
+```
+
+| Scenario | Required call |
+|---|---|
+| Single read or write | `this._execute(async (conn) => { … })` |
+| Multi-step atomic op (`insertMany`, `bulkWrite`) | `this.db.withTransaction(async (conn) => { … })` |
+| Inside a `Transaction` session | `this._conn` is set — `_execute` routes there automatically |
+| **Never** | `oracledb.getPool().getConnection()` or manual `conn.close()` |
+
+`QueryBuilder`, `OracleSchema`, `OracleDCL`, `cteBuilder`, `performanceUtils`, and `setOperations` all call `db.withConnection()` directly (they have no `_conn` override).
+
+### 1.3 — SQL Safety Rules
+
+These are non-negotiable and apply to every SQL string in every file:
+
+1. **Bind variables only** — never string-interpolate user values. No exceptions.
+2. **Unique bind names** — use counter-suffixed names scoped by role:
+   - Filter binds: `where_<field>_0`, `where_<field>_1`, …
+   - Update binds: `upd_<field>_0`, …
+   - Output binds: `out_<field>_0`, …
+3. **Quote all identifiers** — `"TABLE_NAME"."COLUMN_NAME"` (double-quoted, uppercase).
+4. **System table queries** — always `UPPER(:bind)` for `USER_TABLES`, `USER_INDEXES`, etc.
+5. **`autoCommit`** — `false` inside any transaction scope; `true` for standalone reads.
+6. **`outFormat`** — always `this.db.oracledb.OUT_FORMAT_OBJECT`.
+7. **`executeMany`** — always supply explicit `bindDefs`; always `autoCommit: false`.
+8. **Dates** — bind JS `Date` objects directly; wrap string dates in `TO_DATE`/`TO_TIMESTAMP`.
+9. **Large numbers** — Oracle returns `NUMBER` as strings for large values; `convertTypes()` in `utils.js` coerces them back to `Number`.
+10. **Empty filter** — `{}` or `null` → omit `WHERE` entirely. Never emit `WHERE 1=1`.
+
+### 1.4 — Error Format
+
+Every `catch` block must rethrow with this exact shape — **no exceptions**:
+
+```js
+throw new Error(`[ClassName.methodName] ${err.message}\nSQL: ${sql}\nBinds: ${JSON.stringify(binds)}`);
+```
+
+### 1.5 — Return Shapes
+
+| Operation | Shape |
+|---|---|
+| Insert | `{ acknowledged: true, insertedId, insertedCount?, returning? }` |
+| Update | `{ acknowledged: true, matchedCount, modifiedCount, returning? }` |
+| Delete | `{ acknowledged: true, deletedCount, returning? }` |
+| `findOne` / `findOneAnd*` | `document \| null` — never `undefined` |
+| Row counts | `result.rowsAffected` from oracledb |
+
+### 1.6 — Documentation
+
+Every public method must have a JSDoc block with: `@param` types, `@returns` type + shape, and `@example` showing the SQL it generates.
 
 ---
 
-## ⚠️ ARCHITECTURE CONSTRAINT — READ FIRST BEFORE WRITING ANY CODE
+## ⚡ PART 2 — PERFORMANCE REQUIREMENTS
 
-This library is being built **inside an existing Express/OracleDB backend project** that already has a production-grade connection pool manager. **Do not reimplement pool management.** Instead, integrate with the existing system as described below.
+These are design targets, not afterthoughts. Implement them from the start.
 
-### Existing Infrastructure
+### 2.1 — Time Complexity Targets
 
-The project already provides these files (do not recreate them):
+| Operation | Target | Implementation mandate |
+|---|---|---|
+| `findOne` | O(1) w/ index | `FETCH FIRST 1 ROW ONLY` — never fetch-all-then-slice |
+| `insertMany(n)` | O(n) | `executeMany()` in chunks of 500 — never loop `insertOne` |
+| `bulkWrite(n)` | O(n) | Single `withTransaction`, sequential execution, no N+1 |
+| `aggregate` pipeline | O(n) per stage | CTE-chain — one SQL round-trip, Oracle optimizes the plan |
+| `deleteOne` / `updateOne` | O(1) w/ index | Target via `ROWID` subquery, not full-table scan |
+| `distinct` | O(n) | Single `SELECT DISTINCT` — no JS-side dedup |
+| `getIndexes` | O(1) | Single `JOIN` of `USER_INDEXES` + `USER_IND_COLUMNS` — no N+1 |
+| `estimatedDocumentCount` | O(1) | `USER_TABLES.NUM_ROWS` — never `COUNT(*)` |
+| `filterParser` / `updateParser` | O(k) | k = key count — single-pass recursive descent, no re-scans |
+| CTE construction | O(s) | s = stage count — one SQL string build pass, no intermediate arrays |
+
+### 2.2 — Space Complexity Targets
+
+| Concern | Rule |
+|---|---|
+| `forEach` | Use `conn.queryStream()` + async iterator — O(1) memory regardless of result size |
+| `toArray()` | May buffer — add a JSDoc warning for large result sets |
+| `insertMany` batches | `chunkArray(docs, 500)` from `utils.js` — never load all rows into a single bind array |
+| Bind object construction | Build a single accumulator object per query; use `mergeBinds()` — never `Object.assign` spread chains |
+| CTE chain | Each stage appends O(1) SQL text — no JS arrays between stages |
+| `executeMany` bindDefs | Infer once from the first document via `buildBindDefs()` — never re-infer per row |
+
+### 2.3 — Query Optimization Rules
+
+These must be applied inside `aggregatePipeline.js` automatically, without the caller requesting them:
+
+- **Collapse adjacent `$match` stages** — merge into one `WHERE` before building CTEs.
+- **Projection pushdown** — apply `SELECT col1, col2` at the earliest CTE stage, not the final wrapper.
+- **No pass-through CTEs** — never emit `WITH s1 AS (SELECT * FROM s0)` with no transformation. Merge it into the prior stage.
+- **Skip empty stages** — if `$sort`, `$limit`, `$skip`, or `$project` have no meaningful value, omit their SQL clause.
+- **Index hint passthrough** — `options.hint` injects `/*+ INDEX("t" "idx_name") */` as a SQL comment only. Never interpolate user values into hint strings.
+
+---
+
+## 📁 PART 3 — FILE STRUCTURE
 
 ```
-src/config/adapters/oracle.js   ← Pool manager: withConnection, withTransaction,
-                                   withBatchConnection, closeAll, getPoolStats,
-                                   health monitoring, retry logic, graceful shutdown
-src/config/database.js          ← Connection registry: named connections mapped
-                                   to credentials + connect strings
-src/config/index.js             ← Adapter factory barrel — re-exports everything
-                                   from oracle.js + database.js
+oracle-mongo-wrapper/
+├── advanced/
+│   ├── oracleAdvanced.js       ← CONNECT BY, PIVOT, UNPIVOT, AS OF, LATERAL, TABLESAMPLE
+│   └── performanceUtils.js     ← EXPLAIN PLAN, ANALYZE, MATERIALIZED VIEW
+├── core/
+│   ├── OracleCollection.js     ← All CRUD + advanced methods via _execute()
+│   └── QueryBuilder.js         ← Lazy chainable cursor; SQL built only at terminal call
+├── joins/
+│   ├── joinBuilder.js          ← $lookup → SQL JOIN (all join types)
+│   └── setOperations.js        ← UNION, UNION ALL, INTERSECT, MINUS
+├── parsers/
+│   ├── filterParser.js         ← MongoDB filter → parameterized WHERE clause
+│   └── updateParser.js         ← MongoDB update operators → parameterized SET clause
+├── pipeline/
+│   ├── aggregatePipeline.js    ← Pipeline array → CTE-chained SQL (single round-trip)
+│   ├── cteBuilder.js           ← withCTE / withRecursiveCTE standalone exports
+│   ├── subqueryBuilder.js      ← Scalar, inline, correlated, EXISTS subqueries
+│   └── windowFunctions.js      ← $window → SQL analytic OVER() expressions
+├── schema/
+│   ├── OracleDCL.js            ← GRANT, REVOKE
+│   └── OracleSchema.js         ← CREATE/ALTER/DROP TABLE, VIEW, SEQUENCE, SCHEMA
+├── db.js                       ← Thin createDb() factory — delegates to src/config
+├── index.js                    ← Barrel re-export
+├── Transaction.js              ← Transaction class + Session class + savepoints
+└── utils.js                    ← quoteIdentifier, mergeBinds, convertTypes,
+                                   rowToDoc, chunkArray, buildBindDefs
 ```
 
-The existing adapter exposes this API:
+---
+
+## PART 4 — `db.js` — Canonical Implementation (do not modify)
 
 ```js
-const {
-  withConnection,       // withConnection(connectionName, async (conn) => result)
-  withTransaction,      // withTransaction(connectionName, async (conn) => result)
-  withBatchConnection,  // withBatchConnection(connectionName, operations[])
-  closeAll,             // graceful pool shutdown
-  getPoolStats,         // pool monitoring snapshot
-  isPoolHealthy,        // isPoolHealthy(connectionName) → boolean
-  oracledb,             // raw oracledb driver reference
-} = require('./src/config');
-```
-
-Named connections registered in `database.js` (examples):
-- `'userAccount'` — main application schema
-- `'unitInventory'` — inventory schema (dev/prod configs differ)
-
-### How `db.js` Must Be Implemented
-
-`db.js` is **not** a pool manager. It is a **thin factory adapter** that binds a named connection to the wrapper classes. It must delegate entirely to `src/config`.
-
-```js
-// db.js — thin adapter. DO NOT reimplement pool management here.
 'use strict';
-
 const config = require('./src/config');
 
 /**
- * Creates a db interface bound to a named connection from database.js.
- * Pass this instance to OracleCollection, OracleSchema, OracleDCL, etc.
- *
- * @param {string} connectionName - Key from src/config/database.js registry
+ * Creates a db interface bound to a named connection from src/config/database.js.
+ * This is a thin adapter only — all pool logic lives in src/config.
+ * @param {string} connectionName
  * @returns {DbInterface}
  */
 function createDb(connectionName = 'userAccount') {
-  if (!connectionName || typeof connectionName !== 'string') {
+  if (!connectionName || typeof connectionName !== 'string')
     throw new TypeError('createDb: connectionName must be a non-empty string');
-  }
-
   return {
     connectionName,
-
-    /**
-     * Run a callback with a managed connection. The connection is automatically
-     * released after the callback resolves or rejects. Health monitoring,
-     * slow-op warnings, and retry logic are all handled by the underlying adapter.
-     * @param {Function} callback - async (conn) => result
-     */
-    withConnection: (callback) => config.withConnection(connectionName, callback),
-
-    /**
-     * Run a callback inside a BEGIN/COMMIT/ROLLBACK transaction.
-     * On error, rollback is automatic before rethrowing.
-     * @param {Function} callback - async (conn) => result
-     */
-    withTransaction: (callback) => config.withTransaction(connectionName, callback),
-
-    /**
-     * Run multiple operations on one shared connection.
-     * @param {Function[]} operations - array of async (conn) => result
-     */
-    withBatchConnection: (operations) => config.withBatchConnection(connectionName, operations),
-
-    /**
-     * Graceful shutdown of ALL pools. Call once on process exit.
-     * Delegates to the existing adapter's closeAll().
-     */
-    closePool: () => config.closeAll(),
-
-    /** Pool stats snapshot for monitoring. */
-    getPoolStats: () => config.getPoolStats(),
-
-    /** Health check for this named connection's pool. */
-    isHealthy: () => config.isPoolHealthy(connectionName),
-
-    /** Raw oracledb driver — needed for BIND_OUT, OUT_FORMAT_OBJECT, etc. */
-    oracledb: config.oracledb,
+    withConnection:     (cb)  => config.withConnection(connectionName, cb),
+    withTransaction:    (cb)  => config.withTransaction(connectionName, cb),
+    withBatchConnection:(ops) => config.withBatchConnection(connectionName, ops),
+    closePool:          ()    => config.closeAll(),
+    getPoolStats:       ()    => config.getPoolStats(),
+    isHealthy:          ()    => config.isPoolHealthy(connectionName),
+    oracledb:           config.oracledb,
   };
 }
 
 module.exports = { createDb };
 ```
 
-### How All Wrapper Classes Must Use `db`
+---
 
-**Every method in OracleCollection, OracleSchema, OracleDCL, Transaction, etc. must use `db.withConnection()` — never call `db.oracledb.getPool()` or manage connections manually.**
-
-```js
-// ✅ CORRECT — connection lifecycle fully managed by the adapter
-async findOne(filter, options = {}) {
-  return this.db.withConnection(async (conn) => {
-    const { whereClause, binds } = parseFilter(filter);
-    const sql = `SELECT * FROM "${this.tableName}" ${whereClause} FETCH FIRST 1 ROW ONLY`;
-    try {
-      const result = await conn.execute(sql, binds, { outFormat: this.db.oracledb.OUT_FORMAT_OBJECT });
-      return result.rows[0] ?? null;
-    } catch (err) {
-      throw new Error(`[OracleCollection.findOne] ${err.message}\nSQL: ${sql}`);
-    }
-  });
-}
-
-// ❌ WRONG — never do this; leaks connections, bypasses health monitoring
-async findOne(filter, options = {}) {
-  let conn;
-  try {
-    conn = await this.db.oracledb.getPool().getConnection(); // NEVER
-    // ...
-  } finally {
-    if (conn) await conn.close();
-  }
-}
-```
-
-**For `bulkWrite`, `insertMany`, and any multi-step atomic operations, use `db.withTransaction()`:**
+## PART 5 — `utils.js` — Required Exports
 
 ```js
-async bulkWrite(operations) {
-  return this.db.withTransaction(async (conn) => {
-    // all operations share `conn` — commit/rollback handled automatically
-    const results = [];
-    for (const op of operations) {
-      // ... execute each op on `conn`
-      results.push(result);
-    }
-    return { acknowledged: true, results };
-  });
-}
-```
+// All functions must be pure (no side effects, no DB calls).
 
-**For `Transaction.js` sessions with savepoints, use `db.withTransaction()` as the outer scope and call `SAVEPOINT`/`ROLLBACK TO SAVEPOINT` directly on `conn`:**
-
-```js
-// Transaction.js withTransaction wrapper
-async withTransaction(fn) {
-  return this.db.withTransaction(async (conn) => {
-    const session = new Session(conn, this.db);
-    return fn(session);
-  });
-}
-```
-
-### Usage Pattern (Replaces `db.initPool(config)`)
-
-```js
-// Old prompt pattern — DO NOT USE
-const { db } = require('./oracle-mongo-wrapper');
-await db.initPool({ user: '...', password: '...', connectString: '...' });
-
-// ✅ Correct pattern for this project
-const { createDb } = require('./oracle-mongo-wrapper');
-const { OracleCollection, OracleSchema, OracleDCL } = require('./oracle-mongo-wrapper');
-
-// Bind to the named connection registered in src/config/database.js
-const db      = createDb('userAccount');
-const users   = new OracleCollection('users', db);
-const orders  = new OracleCollection('orders', db);
-const schema  = new OracleSchema(db);
-const dcl     = new OracleDCL(db);
-// Pool is already initialized by src/config — no initPool() needed
-```
-
-### `withCTE`, `withRecursiveCTE`, `insertFromQuery`, `updateFromJoin`, `performance`
-
-These top-level helpers in the original prompt were referenced as `db.withCTE(...)`, `db.performance.explainPlan(...)`, etc. In this architecture, expose them as standalone exports from the barrel `index.js`, accepting a `db` instance as first argument:
-
-```js
-// index.js exports
-const { withCTE, withRecursiveCTE } = require('./cteBuilder');
-const { insertFromQuery, updateFromJoin } = require('./OracleCollection');
-const { createPerformance } = require('./performanceUtils');
-
-// Usage
-const cteBuilder  = withCTE(db, { active_users: users.find({ status: 'active' }) });
-const performance = createPerformance(db);
-await performance.explainPlan(users.find({ status: 'active' }));
+quoteIdentifier(name)           // "NAME" — uppercase, double-quoted, O(1)
+mergeBinds(...objects)          // Merge bind objects into one accumulator, throw on collision, O(n keys)
+convertTypes(row)               // Coerce Oracle NUMBER strings → JS Number, O(k columns)
+rowToDoc(row)                   // camelCase keys, strip Oracle metadata columns, O(k)
+chunkArray(arr, size = 500)     // Split array into size-capped sub-arrays, O(n)
+buildBindDefs(sampleDoc, db)    // Build oracledb bindDefs from first document, O(k)
 ```
 
 ---
 
-## 📁 FILE STRUCTURE
+## PART 6 — CATEGORY 1: Query / Read (`OracleCollection`)
 
-```
-/oracle-mongo-wrapper
-  ├── advanced/
-  │   ├── oracleAdvanced.js       ← CONNECT BY, PIVOT, UNPIVOT, FOR UPDATE,
-  │   │                              RETURNING, AS OF, LATERAL JOIN, TABLESAMPLE
-  │   └── performanceUtils.js     ← EXPLAIN PLAN, ANALYZE, MATERIALIZED VIEW
-  │
-  ├── core/
-  │   ├── OracleCollection.js     ← Core CRUD + all query methods
-  │   └── QueryBuilder.js         ← Chainable cursor returned by find()
-  │
-  ├── joins/
-  │   ├── joinBuilder.js          ← Translates $lookup (all join types) → SQL JOIN clauses
-  │   └── setOperations.js        ← UNION, UNION ALL, INTERSECT, MINUS
-  │
-  ├── parsers/
-  │   ├── filterParser.js         ← Translates MongoDB filter object → SQL WHERE clause
-  │   └── updateParser.js         ← Translates MongoDB update operators → SQL SET clause
-  │
-  ├── pipeline/
-  │   ├── aggregatePipeline.js    ← Translates pipeline array → full SQL query
-  │   ├── cteBuilder.js           ← Builds WITH ... AS CTEs (regular + recursive)
-  │   ├── subqueryBuilder.js      ← Builds scalar, inline, correlated, EXISTS subqueries
-  │   └── windowFunctions.js      ← Translates $window expressions → SQL analytic functions
-  │
-  ├── schema/
-  │   ├── OracleDCL.js            ← DCL: grant, revoke
-  │   └── OracleSchema.js         ← DDL: createTable, alterTable, createView, etc.
-  │
-  ├── db.js                       ← Thin adapter factory (createDb) — NO pool management
-  ├── index.js                    ← Main export (barrel file)
-  ├── README.md
-  ├── Transaction.js              ← Transactions + Savepoints
-  └── utils.js                    ← Shared helpers: bindParams, typeMapping, rowToDoc, etc.
-```
+### Methods
 
----
+**`find(filter, options)`** → `QueryBuilder` (lazy — no SQL executed here)
+Options: `sort`, `limit`, `skip`, `projection`, `forUpdate`, `asOf`, `hint`, `sample`
 
-## 📦 GENERAL IMPLEMENTATION RULES
+**`findOne(filter, options)`** → `Object | null`
+Single `FETCH FIRST 1 ROW ONLY` — never fetches more.
 
-- All methods must be `async/await`
-- **Never manage connection lifecycle manually** — always use `db.withConnection()` or `db.withTransaction()`
-- Always use **bind variables** (`:varName`) for all values — **never string interpolation**
-- Return results in MongoDB-style format:
-  ```js
-  // Insert: { acknowledged: true, insertedId: '...' }
-  // Update: { acknowledged: true, matchedCount: 1, modifiedCount: 1 }
-  // Delete: { acknowledged: true, deletedCount: 1 }
-  ```
-- All errors must be caught and rethrown with descriptive messages including the SQL that failed:
-  ```js
-  throw new Error(`[OracleCollection.methodName] ${err.message}\nSQL: ${sql}`)
-  ```
-- Write **JSDoc comments** on every method explaining params, return value, and the SQL it generates
-- Produce a `README.md` with usage examples for every method
-- Produce a `test.js` end-to-end example file
+**`findOneAndUpdate(filter, update, options)`** → `Object | null`
+`SELECT … FOR UPDATE` then `UPDATE` on the same `conn` inside `_execute()`.
+Options: `returnDocument: 'before' | 'after'`, `upsert: true`
+
+**`findOneAndDelete(filter)`** → `Object | null`
+Fetch then delete on the same `conn`. Returns the deleted doc.
+
+**`findOneAndReplace(filter, replacement, options)`** → `Object | null`
+Replaces all columns except primary key. Options: `returnDocument: 'before' | 'after'`
+
+**`countDocuments(filter)`** → `Number` — `SELECT COUNT(*) … WHERE …`
+
+**`estimatedDocumentCount()`** → `Number` — `SELECT NUM_ROWS FROM USER_TABLES WHERE TABLE_NAME = UPPER(:t)` — **O(1), no table scan**
+
+**`distinct(field, filter)`** → `Array` — single `SELECT DISTINCT` — no JS dedup
+
+### `filterParser.js` — Single-Pass Recursive Descent
+
+**Input:** MongoDB filter object
+**Output:** `{ whereClause: 'WHERE …', binds: {} }` — or `{ whereClause: '', binds: {} }` for empty/null filter
+**Error:** throw descriptive message for any unsupported operator
+
+| MongoDB | SQL | Bind naming |
+|---|---|---|
+| `{ field: value }` / `$eq` | `"field" = :where_field_0` | counter-suffixed |
+| `$ne` / `$gt` / `$gte` / `$lt` / `$lte` | `<> / > / >= / < / <=` | same |
+| `$in: [a,b]` | `"field" IN (:in_field_0, :in_field_1)` | indexed per element |
+| `$nin` | `NOT IN (…)` | same |
+| `$between: [min,max]` | `BETWEEN :btw_field_min AND :btw_field_max` | |
+| `$notBetween` | `NOT BETWEEN …` | |
+| `$exists: true/false` | `IS NOT NULL` / `IS NULL` | no bind |
+| `$regex` | `REGEXP_LIKE("field", :rx_field_0)` | |
+| `$like` | `"field" LIKE :lk_field_0` | |
+| `$any` / `$all` | `= ANY(…)` / `= ALL(…)` | |
+| `$and` / `$or` | `(a AND b)` / `(a OR b)` | recurse |
+| `$nor` | `NOT (a OR b)` | recurse |
+| `$not` | `NOT (…)` | recurse |
+| `$case` | `CASE WHEN … THEN … ELSE … END` | |
+| `$coalesce` | `COALESCE(f1, f2, :val)` | |
+| `$nullif` | `NULLIF(f1, :val)` | |
 
 ---
 
-## 🔍 CATEGORY 1 — Query / Read Operations
+## PART 7 — CATEGORY 2: Insert (`OracleCollection`)
 
-Implement on `OracleCollection`:
+**`insertOne(document, options)`** → `{ acknowledged, insertedId, returning? }`
+- Auto-assign `_id` via `SYS_GUID()` if absent
+- `RETURNING "id" INTO :out_id` to capture generated ID
+- `options.returning: ['col1', …]` → multi-column `RETURNING … INTO`
 
-### `find(filter, options)` → returns `QueryBuilder`
-- Translates filter → `WHERE` clause
-- `options.sort` → `ORDER BY`
-- `options.limit` → `FETCH FIRST n ROWS ONLY`
-- `options.skip` → `OFFSET n ROWS`
-- `options.projection` → `SELECT col1, col2` or `SELECT *`
-- `options.forUpdate` → appends `FOR UPDATE`, `FOR UPDATE NOWAIT`, or `FOR UPDATE SKIP LOCKED`
-- Returns a `QueryBuilder` instance for chaining (see Category 8)
-
-### `findOne(filter, options)` → `Object | null`
-- Same as `find()` but appends `FETCH FIRST 1 ROW ONLY`
-- Returns a single document or `null`
-
-### `findOneAndUpdate(filter, update, options)` → `Object | null`
-- Uses `SELECT ... FOR UPDATE` then `UPDATE` on the same `conn` inside `db.withConnection()`
-- `options.returnDocument: 'before' | 'after'` — return doc before or after update
-- `options.upsert: true` — insert if no match
-- Runs atomically within a single connection (not a transaction)
-
-### `findOneAndDelete(filter)` → `Object | null`
-- Fetches the matching row first, then deletes it on the same `conn`
-- Returns the deleted document
-
-### `findOneAndReplace(filter, replacement, options)` → `Object | null`
-- Replaces entire row (except primary key) after SELECT FOR UPDATE
-- `options.returnDocument: 'before' | 'after'`
-
-### `countDocuments(filter)` → `Number`
-- `SELECT COUNT(*) FROM table WHERE ...`
-
-### `estimatedDocumentCount()` → `Number`
-- Fast: `SELECT NUM_ROWS FROM USER_TABLES WHERE TABLE_NAME = UPPER(:name)`
-
-### `distinct(field, filter)` → `Array`
-- `SELECT DISTINCT <field> FROM table WHERE ...`
+**`insertMany(documents)`** → `{ acknowledged, insertedCount, insertedIds[] }`
+- `chunkArray(documents, 500)` — loop chunks inside `db.withTransaction()`
+- Each chunk: `conn.executeMany(sql, bindRows, { autoCommit: false, bindDefs })`
+- `buildBindDefs` called once on `documents[0]`, reused for all chunks
+- Atomic: any chunk failure rolls back all chunks
 
 ---
 
-### Filter Operators (in `filterParser.js`)
-Translate a filter object into a parameterized `WHERE` clause + bind object.
+## PART 8 — CATEGORY 3: Update (`OracleCollection`)
 
-| MongoDB Filter | SQL Translation |
+**`updateOne(filter, update, options)`** → `{ acknowledged, matchedCount, modifiedCount, returning? }`
+Target via: `WHERE ROWID = (SELECT ROWID FROM "t" WHERE … AND ROWNUM = 1)` — O(1) w/ index
+Options: `upsert: true`, `returning: ['col']`
+
+**`updateMany(filter, update, options)`** → `{ acknowledged, matchedCount, modifiedCount, returning? }`
+
+**`replaceOne(filter, replacement, options)`** → `{ acknowledged, matchedCount, modifiedCount }`
+`UPDATE "t" SET col1=:v1, col2=:v2 … WHERE …` — all columns except primary key
+
+**`bulkWrite(operations[])`** → `{ acknowledged, results[] }`
+All ops inside a single `db.withTransaction()`. Supported: `insertOne`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`, `replaceOne`
+
+### `updateParser.js` — Single-Pass
+
+**Output:** `{ setClause: 'SET "col"=:upd_col_0, …', binds: {} }` — all binds prefixed `upd_`
+**Error:** throw if update object is empty
+
+| Operator | SQL |
 |---|---|
-| `{ field: value }` | `field = :field` |
-| `{ field: { $eq: v } }` | `field = :field` |
-| `{ field: { $ne: v } }` | `field <> :field` |
-| `{ field: { $gt: v } }` | `field > :field` |
-| `{ field: { $gte: v } }` | `field >= :field` |
-| `{ field: { $lt: v } }` | `field < :field` |
-| `{ field: { $lte: v } }` | `field <= :field` |
-| `{ field: { $in: [a,b] } }` | `field IN (:v0, :v1)` |
-| `{ field: { $nin: [a,b] } }` | `field NOT IN (:v0, :v1)` |
-| `{ field: { $between: [min, max] } }` | `field BETWEEN :min AND :max` |
-| `{ field: { $notBetween: [min, max] } }` | `field NOT BETWEEN :min AND :max` |
-| `{ field: { $exists: true } }` | `field IS NOT NULL` |
-| `{ field: { $exists: false } }` | `field IS NULL` |
-| `{ field: { $regex: 'pat' } }` | `REGEXP_LIKE(field, :pat)` |
-| `{ field: { $like: 'pat%' } }` | `field LIKE :pat` |
-| `{ field: { $any: [a,b] } }` | `field = ANY(:v0, :v1)` |
-| `{ field: { $all: [a,b] } }` | `field = ALL(:v0, :v1)` |
-| `{ $and: [{...},{...}] }` | `(cond1 AND cond2)` |
-| `{ $or: [{...},{...}] }` | `(cond1 OR cond2)` |
-| `{ $nor: [{...},{...}] }` | `NOT (cond1 OR cond2)` |
-| `{ $not: { field: v } }` | `NOT (field = :v)` |
-| `{ field: { $case: [{when, then}], $else: v } }` | `CASE WHEN ... THEN ... ELSE ... END` |
-| `{ field: { $coalesce: [f1, f2, fallback] } }` | `COALESCE(f1, f2, :fallback)` |
-| `{ field: { $nullif: [f1, f2] } }` | `NULLIF(f1, :f2)` |
-
-**Rules for filterParser.js:**
-- Bind variable names must be unique — use a counter suffix (`:field_0`, `:field_1`) when the same field appears multiple times
-- Return `{ whereClause: 'WHERE ...', binds: { field_0: value } }`
-- Return `{ whereClause: '', binds: {} }` if filter is empty or `{}`
-- Throw a descriptive error for unsupported operators
+| `$set` | `"field" = :upd_field_0` |
+| `$unset` | `"field" = NULL` |
+| `$inc` | `"field" = "field" + :upd_field_0` |
+| `$mul` | `"field" = "field" * :upd_field_0` |
+| `$min` / `$max` | `LEAST("field", :v)` / `GREATEST("field", :v)` |
+| `$currentDate` | `"field" = SYSDATE` — no bind |
+| `$rename` | **Throw:** `"Use ALTER TABLE to rename columns"` |
 
 ---
 
-## ✏️ CATEGORY 2 — Insert Operations
+## PART 9 — CATEGORY 4: Delete (`OracleCollection`)
 
-### `insertOne(document, options)` → `{ acknowledged, insertedId, returning? }`
-- Auto-generate `_id` using `SYS_GUID()` if document has no `id` field
-- `INSERT INTO table (col1, col2, ...) VALUES (:v1, :v2, ...)`
-- Use `RETURNING id INTO :outId` to capture the generated ID
-- `options.returning: ['col']` — return additional columns via `RETURNING ... INTO`
+**`deleteOne(filter, options)`** → `{ acknowledged, deletedCount, returning? }`
+Target via `ROWID` subquery (same as `updateOne`) — O(1) w/ index
 
-### `insertMany(documents)` → `{ acknowledged, insertedCount, insertedIds[] }`
-- Use `connection.executeMany()` for batch performance
-- All rows inserted in a single round-trip inside `db.withTransaction()`
-- Rollback all rows if any insertion fails (atomic batch)
-- Pass `{ autoCommit: false, bindDefs: {...} }` to `executeMany` — transaction handles commit
+**`deleteMany(filter)`** → `{ acknowledged, deletedCount }`
+`result.rowsAffected` → `deletedCount`
+
+**`drop()`** → `{ acknowledged }`
+`DROP TABLE "tableName" CASCADE CONSTRAINTS`
+Throw descriptively if table does not exist.
 
 ---
 
-## 🔄 CATEGORY 3 — Update Operations
+## PART 10 — CATEGORY 5: Aggregation Pipeline (`aggregatePipeline.js`)
 
-### `updateOne(filter, update, options)` → `{ acknowledged, matchedCount, modifiedCount, returning? }`
-- Updates the first matching row
-- Use `WHERE ROWID = (SELECT ROWID FROM table WHERE ... AND ROWNUM = 1)` to target single row
-- `options.upsert: true` — insert if no rows matched
-- `options.returning: ['col']` — return values after update via `RETURNING ... INTO`
+### Architecture — One SQL Round-Trip
 
-### `updateMany(filter, update, options)` → `{ acknowledged, matchedCount, modifiedCount, returning? }`
-- Updates all matching rows
-- `options.returning: ['col']` supported
+```sql
+WITH stage_0 AS (SELECT "col1","col2" FROM "table" WHERE …),      -- $match (collapsed)
+     stage_1 AS (SELECT …, SUM("col") total FROM stage_0 GROUP BY …), -- $group
+     stage_2 AS (SELECT *, RANK() OVER (…) rnk FROM stage_1)      -- $addFields
+SELECT * FROM stage_2 ORDER BY total DESC
+FETCH FIRST :lim ROWS ONLY OFFSET :skip ROWS
+```
 
-### `replaceOne(filter, replacement, options)` → `{ acknowledged, matchedCount, modifiedCount }`
-- Replaces all columns (except `id`/primary key)
-- Builds `UPDATE table SET col1=:v1, col2=:v2 ... WHERE ...`
+**Mandatory optimizations (automatic, not caller-triggered):**
+1. Collapse all adjacent `$match` stages before building.
+2. Push `$project` / `$addFields` columns to the earliest stage that produces them.
+3. Never emit a CTE stage that is `SELECT * FROM prev` with no transformation — fold it.
+4. Place `ORDER BY`, `FETCH FIRST`, `OFFSET` on the final outer `SELECT`, never inside a CTE.
 
-### `bulkWrite(operations)` → `{ acknowledged, results[] }`
-- Accepts array of operation objects:
-  ```js
-  [
-    { insertOne: { document: {...} } },
-    { updateOne: { filter: {...}, update: {...} } },
-    { updateMany: { filter: {...}, update: {...} } },
-    { deleteOne: { filter: {...} } },
-    { deleteMany: { filter: {...} } },
-    { replaceOne: { filter: {...}, replacement: {...} } }
-  ]
-  ```
-- Executes all operations within `db.withTransaction()` — all succeed or all rollback
+### Supported Stages
 
----
+| Stage | SQL | Notes |
+|---|---|---|
+| `$match` | `WHERE` (filterParser) | Collapse adjacent |
+| `$group` | `GROUP BY` | `$sum,$avg,$min,$max,$count,$first,$last` |
+| `$project` | `SELECT` cols / exprs | Pushdown |
+| `$addFields` | Extra computed cols in SELECT | |
+| `$sort` | `ORDER BY` | Final outer SELECT only |
+| `$limit` / `$skip` | `FETCH FIRST` / `OFFSET` | Final outer SELECT only |
+| `$count` | `SELECT COUNT(*) AS field` | |
+| `$lookup` | JOIN (joinBuilder) | |
+| `$unwind` | `JSON_TABLE` or documented limitation | |
+| `$replaceRoot` | Rewrite SELECT to sub-doc fields | |
+| `$facet` | Multiple CTEs + `UNION ALL` | |
+| `$bucket` | `CASE WHEN` range grouping | |
+| `$out` | `INSERT INTO target SELECT …` | |
+| `$merge` | `MERGE INTO target USING (…) ON (…)` | |
+| `$having` | `HAVING` after GROUP BY | |
+| `$rollup` | `GROUP BY ROLLUP(…)` | |
+| `$cube` | `GROUP BY CUBE(…)` | |
+| `$groupingSets` | `GROUP BY GROUPING SETS(…)` | |
 
-### Update Operators (in `updateParser.js`)
-Translate update object into a parameterized `SET` clause.
-
-| MongoDB Operator | SQL Translation |
-|---|---|
-| `$set: { field: v }` | `field = :v` |
-| `$unset: { field: '' }` | `field = NULL` |
-| `$inc: { field: n }` | `field = field + :n` |
-| `$mul: { field: n }` | `field = field * :n` |
-| `$min: { field: v }` | `field = LEAST(field, :v)` |
-| `$max: { field: v }` | `field = GREATEST(field, :v)` |
-| `$currentDate: { field: true }` | `field = SYSDATE` |
-| `$rename: { old: new }` | Throw error: "Use ALTER TABLE to rename columns" |
-
-**Rules for updateParser.js:**
-- Return `{ setClause: 'SET col1=:v1, col2=:v2', binds: { v1: ..., v2: ... } }`
-- Merge binds from both `updateParser` and `filterParser` — ensure no key collisions by prefixing update binds with `upd_`
-- Throw if update object is empty
-
----
-
-## 🗑️ CATEGORY 4 — Delete Operations
-
-### `deleteOne(filter, options)` → `{ acknowledged, deletedCount, returning? }`
-- Deletes first matching row using `WHERE ROWID = (SELECT ROWID FROM table WHERE ... AND ROWNUM = 1)`
-- `options.returning: ['col']` — capture deleted row values via `RETURNING ... INTO`
-
-### `deleteMany(filter)` → `{ acknowledged, deletedCount }`
-- Deletes all matching rows
-- Returns `rowsAffected` as `deletedCount`
-
-### `drop()` → `{ acknowledged }`
-- `DROP TABLE <tableName> CASCADE CONSTRAINTS`
-- Throws descriptive error if table does not exist
-
----
-
-## 📊 CATEGORY 5 — Aggregation Pipeline
-
-### `aggregate(pipeline)` → `Array`
-Translates a MongoDB-style pipeline array into a single SQL query using CTEs and subqueries.
-
-**Pipeline stages supported:**
-
-| Stage | SQL Translation |
-|---|---|
-| `$match` | `WHERE ...` (uses filterParser) |
-| `$group` | `GROUP BY` with `$sum`, `$avg`, `$min`, `$max`, `$count`, `$first`, `$last` |
-| `$project` | `SELECT col1, col2, expr AS alias` |
-| `$sort` | `ORDER BY col ASC/DESC` |
-| `$limit` | `FETCH FIRST n ROWS ONLY` |
-| `$skip` | `OFFSET n ROWS` |
-| `$count` | `SELECT COUNT(*) AS field` |
-| `$addFields` | Additional computed columns in SELECT |
-| `$lookup` | JOIN (see Category 9) |
-| `$unwind` | Requires JSON_TABLE or note: Oracle arrays via XMLTABLE/JSON_TABLE |
-| `$replaceRoot` | Rewrite SELECT to use sub-document fields |
-| `$facet` | Multiple sub-pipelines as CTEs, merged with UNION ALL |
-| `$bucket` | `CASE WHEN` range grouping |
-| `$out` | `INSERT INTO targetTable SELECT ...` |
-| `$merge` | `MERGE INTO targetTable USING (SELECT ...) ON (...)` |
-| `$having` | `HAVING` clause after GROUP BY |
-
-**Aggregation expression operators:**
+### Expression Operators
 
 | Expression | SQL |
 |---|---|
-| `$sum: '$field'` | `SUM(field)` |
-| `$avg: '$field'` | `AVG(field)` |
-| `$min: '$field'` | `MIN(field)` |
-| `$max: '$field'` | `MAX(field)` |
-| `$count: '*'` | `COUNT(*)` |
-| `$first: '$field'` | `MIN(field)` (Oracle workaround) |
-| `$last: '$field'` | `MAX(field)` (Oracle workaround) |
-| `$concat: ['$f1','$f2']` | `f1 \|\| f2` |
-| `$toUpper: '$field'` | `UPPER(field)` |
-| `$toLower: '$field'` | `LOWER(field)` |
-| `$substr: ['$f', start, len]` | `SUBSTR(field, start, len)` |
-| `$dateToString: { format, date }` | `TO_CHAR(date, format)` |
-| `$cond: { if, then, else }` | `CASE WHEN ... THEN ... ELSE ... END` |
-| `$ifNull: ['$f', default]` | `COALESCE(field, :default)` |
-| `$size: '$arrayField'` | `JSON_ARRAY_LENGTH(field)` |
-
-**Rules for aggregatePipeline.js:**
-- Each pipeline stage wraps the previous as a CTE for clean chaining:
-  ```sql
-  WITH stage_0 AS (SELECT * FROM table WHERE ...),
-       stage_1 AS (SELECT ..., SUM(col) FROM stage_0 GROUP BY ...),
-       stage_2 AS (SELECT * FROM stage_1 ORDER BY ...)
-  SELECT * FROM stage_2 FETCH FIRST :limit ROWS ONLY OFFSET :skip ROWS
-  ```
-- Optimize: collapse adjacent `$match` stages into one WHERE
-- Throw descriptive errors for unsupported stage combinations
+| `$sum/$avg/$min/$max/$count` | `SUM/AVG/MIN/MAX/COUNT` |
+| `$first/$last` | `MIN/MAX` (Oracle workaround — document it) |
+| `$concat` | `f1 \|\| f2` |
+| `$toUpper/$toLower` | `UPPER/LOWER` |
+| `$substr` | `SUBSTR(f, start, len)` |
+| `$dateToString` | `TO_CHAR(date, format)` |
+| `$cond` | `CASE WHEN … THEN … ELSE … END` |
+| `$ifNull` | `COALESCE(f, :default)` |
+| `$size` | `JSON_ARRAY_LENGTH(f)` |
 
 ---
 
-## 🗂️ CATEGORY 6 — Index Operations
+## PART 11 — CATEGORY 6: Index Operations (`OracleCollection`)
 
-### `createIndex(fields, options)` → `{ acknowledged, indexName }`
-- `fields`: `{ colName: 1 }` (1 = ASC, -1 = DESC)
-- `options.unique: true` → `CREATE UNIQUE INDEX`
-- `options.name` → custom index name; auto-generate as `idx_<table>_<cols>` if not provided
-- `options.type: 'bitmap'` → `CREATE BITMAP INDEX` (Oracle-specific)
+**`createIndex(fields, options)`** → `{ acknowledged, indexName }`
+`fields`: `{ col: 1 }` (1=ASC, -1=DESC). Auto-name: `idx_<table>_<cols>`.
+`options.unique` → `UNIQUE`. `options.type: 'bitmap'` → `BITMAP`.
 
-### `createIndexes(indexSpecs[])` → `{ acknowledged, indexNames[] }`
-- Loops `createIndex()` for each spec
+**`createIndexes(specs[])`** — loops `createIndex()`. Returns `{ acknowledged, indexNames[] }`.
 
-### `dropIndex(indexName)` → `{ acknowledged }`
-- `DROP INDEX <name>`
+**`dropIndex(name)`** → `{ acknowledged }` — `DROP INDEX "name"`
 
-### `dropIndexes()` → `{ acknowledged, dropped[] }`
-- Query `USER_INDEXES` for all non-primary indexes on this table
-- Drop each one
+**`dropIndexes()`** → `{ acknowledged, dropped[] }`
+Single query to `USER_INDEXES`, then loop drops. No N+1.
 
-### `getIndexes()` → `Array`
-- Query `USER_INDEXES` joined with `USER_IND_COLUMNS`
-- Return array of `{ indexName, columns, unique, type }`
+**`getIndexes()`** → `Array<{ indexName, columns, unique, type }>`
+Single `USER_INDEXES JOIN USER_IND_COLUMNS` query — **O(1) db round-trip**.
 
-### `reIndex()` → `{ acknowledged }`
-- `ALTER INDEX <name> REBUILD` for all indexes on this table
+**`reIndex()`** → `{ acknowledged }` — `ALTER INDEX "name" REBUILD` per index.
 
 ---
 
-## 🔐 CATEGORY 7 — Transaction Operations (in `Transaction.js`)
+## PART 12 — CATEGORY 7: Transactions (`Transaction.js`)
 
-**Important:** The underlying commit/rollback/connection lifecycle is handled by `db.withTransaction()` from the existing adapter. `Transaction.js` wraps that to expose a MongoDB-style session API with savepoint support.
-
-### `Session` class (internal)
-- Holds a reference to the raw `conn` passed by `db.withTransaction()`
-- Exposes `collection(tableName)` — returns an `OracleCollection` bound to this session's `conn`
-- All collection operations on a session reuse the **same `conn`** — no new connections acquired
-
-### `withTransaction(fn)` → any
-```js
-await db.withTransaction(async (session) => {
-  await session.collection('orders').insertOne({ item: 'pen', qty: 5 })
-  await session.collection('inventory').updateOne(
-    { item: 'pen' },
-    { $inc: { qty: -5 } }
-  )
-})
-```
-- Delegates to `db.withTransaction(async (conn) => { ... })` from the existing adapter
-- On success: adapter auto-commits
-- On any error: adapter auto-rollbacks, then rethrows
-
-### `savepoint(name)` → void
-- `await conn.execute('SAVEPOINT ' + name)`
-- Called on the session's `conn` directly
-
-### `rollbackTo(name)` → void
-- `await conn.execute('ROLLBACK TO SAVEPOINT ' + name)`
-
-### `releaseSavepoint(name)` → void
-- Not natively supported in Oracle — implement as no-op with console warning
-
-**Session-aware OracleCollection:**
-
-When `OracleCollection` is instantiated from a session, it must skip calling `db.withConnection()` and instead execute directly on the provided `conn`. Implement via an internal `_conn` override:
+`db.withTransaction()` owns commit/rollback. `Transaction.js` adds a MongoDB-style session API with savepoint support on top of it.
 
 ```js
-class OracleCollection {
-  constructor(tableName, db, _conn = null) {
-    this.tableName = tableName;
-    this.db = db;
-    this._conn = _conn; // set when used inside a transaction session
-  }
+class Session {
+  constructor(conn, db) { this.conn = conn; this.db = db; }
+  collection(tableName)    { return new OracleCollection(tableName, this.db, this.conn); }
+  savepoint(name)          { return this.conn.execute(`SAVEPOINT "${name}"`); }
+  rollbackTo(name)         { return this.conn.execute(`ROLLBACK TO SAVEPOINT "${name}"`); }
+  releaseSavepoint(name)   { /* Oracle no-op — log console.warn */ }
+}
 
-  async _execute(fn) {
-    if (this._conn) {
-      // Already inside a transaction — use the shared conn directly
-      return fn(this._conn);
-    }
-    // Normal path — acquire a managed connection
-    return this.db.withConnection(fn);
+class Transaction {
+  constructor(db) { this.db = db; }
+  withTransaction(fn) {
+    return this.db.withTransaction(async (conn) => fn(new Session(conn, this.db)));
   }
-
-  async findOne(filter, options = {}) {
-    return this._execute(async (conn) => {
-      // ... build and execute SQL on conn
-    });
-  }
-  // ... all other methods use this._execute(async (conn) => { ... })
 }
 ```
 
-**Full savepoint example:**
-```js
-await transactionManager.withTransaction(async (session) => {
-  await session.collection('orders').insertOne({ item: 'pen' })
-  await session.savepoint('after_order')
-  try {
-    await session.collection('payments').insertOne({ amount: -999 })
-  } catch (err) {
-    await session.rollbackTo('after_order')
-  }
-  await session.collection('logs').insertOne({ event: 'order_created' })
-})
-```
+**`OracleCollection` constructor:** `(tableName, db, _conn = null)`
+When `_conn` is set (session context), `_execute(fn)` calls `fn(this._conn)` directly — no new connection acquired.
 
 ---
 
-## 🛠️ CATEGORY 8 — QueryBuilder (Cursor Chaining)
+## PART 13 — CATEGORY 8: QueryBuilder — Lazy Cursor (`core/QueryBuilder.js`)
 
-`find()` returns a `QueryBuilder` instance. All methods are chainable and lazy — SQL is only executed when a terminal method is called. Terminal methods call `db.withConnection()` (or use `_conn` if inside a session).
+All chainable methods mutate internal state and return `this`. **No SQL is built or executed until a terminal method is called.**
 
-```js
-const results = await users
-  .find({ status: 'active' })
-  .sort({ name: 1, age: -1 })
-  .skip(20)
-  .limit(10)
-  .project({ name: 1, email: 1 })
-  .toArray()
-```
+**Non-terminal (chainable):**
 
-| Method | SQL Effect | Terminal? |
-|---|---|---|
-| `.sort(obj)` | `ORDER BY col ASC/DESC` | No |
-| `.limit(n)` | `FETCH FIRST n ROWS ONLY` | No |
-| `.skip(n)` | `OFFSET n ROWS` | No |
-| `.project(obj)` | `SELECT col1, col2` | No |
-| `.forUpdate(mode)` | `FOR UPDATE [NOWAIT\|SKIP LOCKED]` | No |
-| `.toArray()` | Execute → return all rows as array | ✅ Yes |
-| `.forEach(fn)` | Execute → call fn for each row | ✅ Yes |
-| `.next()` | Execute → return first row | ✅ Yes |
-| `.hasNext()` | Execute → return boolean | ✅ Yes |
-| `.count()` | `SELECT COUNT(*) ...` | ✅ Yes |
-| `.explain()` | Return SQL string (dry run, no execution) | ✅ Yes |
-
-**Rules:**
-- Calling `.sort()` after `.toArray()` must throw: "Cannot chain after terminal method"
-- `.skip()` without `.limit()` must still work (Oracle supports `OFFSET` alone)
-- `.project({ field: 0 })` means exclude — translate to SELECT all other columns
-- `QueryBuilder` must hold a reference to `db` and `_conn` (for session use) — terminal methods call `db.withConnection()` or `_conn` accordingly
-
----
-
-## 🔗 CATEGORY 9 — JOINs and Set Operations
-
-### JOINs (in `joinBuilder.js`)
-
-Used inside `aggregate()` pipeline as a `$lookup` stage.
-
-```js
-await orders.aggregate([
-  {
-    $lookup: {
-      from: 'customers',
-      localField: 'customerId',
-      foreignField: 'id',
-      as: 'customerInfo',
-      joinType: 'left'  // 'left' | 'right' | 'full' | 'inner' | 'cross'
-    }
-  }
-])
-```
-
-| `joinType` | SQL |
+| Method | SQL effect |
 |---|---|
-| `'left'` (default) | `LEFT OUTER JOIN customers c ON o.customerId = c.id` |
-| `'right'` | `RIGHT OUTER JOIN customers c ON o.customerId = c.id` |
-| `'full'` | `FULL OUTER JOIN customers c ON o.customerId = c.id` |
-| `'inner'` | `INNER JOIN customers c ON o.customerId = c.id` |
-| `'cross'` | `CROSS JOIN customers c` |
-| `'self'` | Self-join: `table t1 INNER JOIN table t2 ON t1.id = t2.parentId` |
-| `'natural'` | `NATURAL JOIN table` |
+| `.sort(obj)` | `ORDER BY "col" ASC/DESC` |
+| `.limit(n)` | `FETCH FIRST n ROWS ONLY` |
+| `.skip(n)` | `OFFSET n ROWS` (valid without limit) |
+| `.project(obj)` | `SELECT col1, col2` — `{ field: 0 }` = exclude (introspect `USER_TAB_COLUMNS`) |
+| `.forUpdate(mode)` | `FOR UPDATE [NOWAIT \| SKIP LOCKED]` |
+| `.asOf(opt)` | `AS OF SCN :v` or `AS OF TIMESTAMP TO_TIMESTAMP(:v, …)` |
+| `.hint(str)` | `/*+ str */` injected as SQL comment only |
 
-**Multi-condition joins:**
-```js
-$lookup: {
-  from: 'inventory',
-  as: 'stock',
-  joinType: 'inner',
-  on: [
-    { localField: 'productId', foreignField: 'id' },
-    { localField: 'warehouseId', foreignField: 'warehouseId' }
-  ]
-}
-```
-→ `INNER JOIN inventory ON t.productId = inventory.id AND t.warehouseId = inventory.warehouseId`
+**Terminal (executes SQL):**
 
-**Self-join example:**
-```js
-$lookup: {
-  from: 'employees',
-  as: 'manager',
-  joinType: 'self',
-  localField: 'managerId',
-  foreignField: 'id'
-}
-```
-
----
-
-### Set Operations (in `setOperations.js`)
-
-Top-level static methods on `OracleCollection`:
-
-```js
-// UNION — combine, remove duplicates
-await OracleCollection.union(
-  users.find({ city: 'Manila' }),
-  users.find({ city: 'Cebu' })
-)
-
-// UNION ALL — combine, keep duplicates
-await OracleCollection.union(
-  users.find({ city: 'Manila' }),
-  users.find({ city: 'Cebu' }),
-  { all: true }
-)
-
-// INTERSECT — rows in BOTH queries
-await OracleCollection.intersect(
-  users.find({ role: 'admin' }),
-  users.find({ status: 'active' })
-)
-
-// MINUS — rows in first but NOT in second
-await OracleCollection.minus(
-  users.find({ role: 'admin' }),
-  users.find({ status: 'inactive' })
-)
-```
+| Method | Behavior | Complexity |
+|---|---|---|
+| `.toArray()` | Buffer all rows — JSDoc warn for large sets | O(n) |
+| `.forEach(fn)` | `conn.queryStream()` async iterator | O(1) memory |
+| `.next()` | `FETCH FIRST 1 ROW ONLY` | O(1) |
+| `.hasNext()` | Boolean — first row exists | O(1) |
+| `.count()` | `SELECT COUNT(*) …` | O(n) w/ index |
+| `.explain()` | Return SQL string only — no db call | O(1) |
 
 **Rules:**
-- Both QueryBuilder instances must target the same number of projected columns — validate before executing, throw if mismatch
-- All set operations return a `QueryBuilder`-like object supporting `.sort()`, `.limit()`, `.skip()`, `.toArray()`
-- Chained `.sort()` wraps the set operation: `SELECT * FROM (query1 UNION query2) ORDER BY col`
-- Set operation execution uses `db.withConnection()` from the first QueryBuilder's `db` reference
+- Calling any non-terminal method after a terminal method → throw `"Cannot chain after terminal method"`.
+- `QueryBuilder` holds references to `db` and `_conn` (for session routing). Terminal methods call `_execute` on the parent collection — or if constructed standalone, call `db.withConnection()` directly.
 
 ---
 
-## 🏗️ CATEGORY 10 — DDL Operations (in `OracleSchema.js`)
+## PART 14 — CATEGORY 9: JOINs and Set Operations
 
-### `createTable(tableName, columns, options)`
-```js
-await schema.createTable('products', {
-  id:         { type: 'NUMBER',       primaryKey: true, autoIncrement: true },
-  name:       { type: 'VARCHAR2(200)', notNull: true },
-  price:      { type: 'NUMBER(10,2)', default: 0 },
-  category:   { type: 'VARCHAR2(100)' },
-  createdAt:  { type: 'DATE',         default: 'SYSDATE' },
-  status:     { type: 'VARCHAR2(20)', check: "status IN ('active','inactive')" },
-  userId:     { type: 'NUMBER',       references: { table: 'users', column: 'id' } }
-}, { ifNotExists: true })
-```
-→ `CREATE TABLE products ( id NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ... )`
+### `joinBuilder.js` — `$lookup` → SQL JOIN
 
-### `alterTable(tableName, operation)`
-```js
-await schema.alterTable('products', { addColumn:    { discountPct: 'NUMBER(5,2)' } })
-await schema.alterTable('products', { dropColumn:   'discountPct' })
-await schema.alterTable('products', { modifyColumn: { price: 'NUMBER(12,2) NOT NULL' } })
-await schema.alterTable('products', { renameColumn: { from: 'name', to: 'productName' } })
-await schema.alterTable('products', { addConstraint: { type: 'UNIQUE', columns: ['name'] } })
-await schema.alterTable('products', { dropConstraint: 'UK_PRODUCTS_NAME' })
-```
+Supports single and multi-condition joins via `on: [{ localField, foreignField }, …]`.
 
-### `dropTable(tableName, options)`
-- `options.cascade: true` → `DROP TABLE ... CASCADE CONSTRAINTS PURGE`
-- `options.ifExists: true` → wrap in existence check using `USER_TABLES`
+| `joinType` | SQL clause |
+|---|---|
+| `left` (default) | `LEFT OUTER JOIN` |
+| `right` | `RIGHT OUTER JOIN` |
+| `full` | `FULL OUTER JOIN` |
+| `inner` | `INNER JOIN` |
+| `cross` | `CROSS JOIN` (no ON clause) |
+| `self` | `"table" t1 INNER JOIN "table" t2 ON t1."id" = t2."parentId"` |
+| `natural` | `NATURAL JOIN` |
 
-### `truncateTable(tableName)` → `TRUNCATE TABLE <name>`
+### `setOperations.js` — Static methods on `OracleCollection`
 
-### `renameTable(oldName, newName)` → `RENAME oldName TO newName`
+`union(qb1, qb2, { all })`, `intersect(qb1, qb2)`, `minus(qb1, qb2)`
 
-### `createView(viewName, queryBuilderOrSQL, options)`
-- `options.orReplace: true` → `CREATE OR REPLACE VIEW`
-- `options.force: true` → `CREATE FORCE VIEW`
-```js
-await schema.createView('active_users',
-  users.find({ status: 'active' }).project({ id: 1, name: 1, email: 1 }),
-  { orReplace: true }
-)
-```
-
-### `dropView(viewName, options)`
-- `options.ifExists: true` → check `USER_VIEWS` before dropping
-
-### `createSequence(name, options)`
-```js
-await schema.createSequence('order_seq', {
-  startWith: 1, incrementBy: 1,
-  maxValue: 9999999, cycle: false, cache: 20
-})
-```
-→ `CREATE SEQUENCE order_seq START WITH 1 INCREMENT BY 1 MAXVALUE 9999999 NOCYCLE CACHE 20`
-
-### `createSchema(schemaName)` → `CREATE SCHEMA AUTHORIZATION <name>`
+- Validate matching projected column counts before execution — throw on mismatch.
+- Return a `SetOperationBuilder` supporting `.sort()`, `.limit()`, `.skip()`, `.toArray()`.
+- `.sort()` wraps: `SELECT * FROM (q1 UNION q2) ORDER BY col` — no intermediate buffer.
+- Execution uses `db.withConnection()` from `qb1.db`.
 
 ---
 
-## 🔀 CATEGORY 11 — MERGE / UPSERT (in `OracleCollection.js`)
+## PART 15 — CATEGORY 10: DDL (`schema/OracleSchema.js`)
 
-### `merge(sourceData, matchCondition, options)`
-```js
-await employees.merge(
-  { id: 5, name: 'Maria', salary: 55000 },
-  { localField: 'id', foreignField: 'id' },
-  {
-    whenMatched:    { $set: { name: 'Maria', salary: 55000 } },
-    whenNotMatched: 'insert',
-    whenMatchedDelete: { salary: { $lt: 0 } }
-  }
-)
-```
+**`createTable(tableName, columns, options)`**
+Column options: `type`, `primaryKey`, `autoIncrement` (→ `GENERATED ALWAYS AS IDENTITY`), `notNull`, `default`, `check`, `references`.
+`options.ifNotExists` → check `USER_TABLES` first.
 
-Translates to:
+**`alterTable(tableName, operation)`**
+One operation object per call: `addColumn`, `dropColumn`, `modifyColumn`, `renameColumn`, `addConstraint`, `dropConstraint`.
+
+**`dropTable(tableName, options)`** — `cascade` → `CASCADE CONSTRAINTS PURGE`, `ifExists` → check `USER_TABLES`
+
+**`truncateTable(tableName)`** — `TRUNCATE TABLE "name"`
+
+**`renameTable(old, new)`** — `RENAME "old" TO "new"`
+
+**`createView(name, queryBuilderOrSQL, options)`** — `orReplace`, `force`
+Accepts a `QueryBuilder` instance (calls `.explain()` to extract SQL) or a raw SQL string.
+
+**`dropView(name, options)`** — `ifExists` → check `USER_VIEWS`
+
+**`createSequence(name, options)`** — `startWith`, `incrementBy`, `maxValue`, `cycle`, `cache`
+
+**`createSchema(name)`** — `CREATE SCHEMA AUTHORIZATION "name"`
+
+---
+
+## PART 16 — CATEGORY 11: MERGE / UPSERT (`OracleCollection`)
+
+**`merge(sourceData, matchCondition, options)`**
+
 ```sql
-MERGE INTO employees tgt
-USING (SELECT :id AS id, :name AS name, :salary AS salary FROM DUAL) src
-ON (tgt.id = src.id)
+MERGE INTO "employees" tgt
+USING (SELECT :id AS "id", :name AS "name" FROM DUAL) src
+ON (tgt."id" = src."id")
 WHEN MATCHED THEN
-  UPDATE SET tgt.name = src.name, tgt.salary = src.salary
-  DELETE WHERE tgt.salary < 0
+  UPDATE SET tgt."name" = src."name"
+  DELETE WHERE tgt."salary" < 0
 WHEN NOT MATCHED THEN
-  INSERT (id, name, salary) VALUES (src.id, src.name, src.salary)
+  INSERT ("id","name") VALUES (src."id", src."name")
 ```
 
-**Also support merging from another table:**
-```js
-await employees.mergeFrom('salary_updates',
-  { localField: 'id', foreignField: 'empId' },
-  { whenMatched: { $set: { salary: '$src.newSalary' } } }
-)
-```
+Options: `whenMatched` (update spec), `whenNotMatched: 'insert'`, `whenMatchedDelete` (filter)
+
+**`mergeFrom(sourceTable, matchCondition, options)`** — source is a table, not `DUAL`
 
 ---
 
-## 📋 CATEGORY 13 — Subqueries (in `subqueryBuilder.js`)
+## PART 17 — CATEGORY 13: Subqueries (`pipeline/subqueryBuilder.js`)
 
-### Scalar Subquery (in SELECT projection):
-```js
-users.find({}, {
-  projection: {
-    name: 1,
-    orderCount: { $subquery: { collection: 'orders', fn: 'count', filter: { userId: '$id' } } }
-  }
-})
-```
-→ `SELECT name, (SELECT COUNT(*) FROM orders WHERE userId = u.id) AS orderCount FROM users u`
-
-### Inline View (subquery in FROM):
-```js
-const subq = orders.aggregate([
-  { $group: { _id: '$userId', total: { $sum: '$amount' } } }
-])
-await users.find({}, { from: { subquery: subq, as: 'order_totals' } })
-```
-→ `SELECT * FROM (SELECT userId, SUM(amount) total FROM orders GROUP BY userId) order_totals`
-
-### Correlated Subquery:
-```js
-users.find({
-  salary: {
-    $gt: {
-      $subquery: {
-        collection: 'employees',
-        field: 'salary',
-        aggregate: '$avg',
-        where: { deptId: '$outer.deptId' }
-      }
-    }
-  }
-})
-```
-→ `WHERE salary > (SELECT AVG(salary) FROM employees WHERE deptId = u.deptId)`
-
-### EXISTS / NOT EXISTS:
-```js
-users.find({ $exists:    { collection: 'orders', match: { userId: '$id' } } })
-users.find({ $notExists: { collection: 'orders', match: { userId: '$id' } } })
-```
-→ `WHERE EXISTS (SELECT 1 FROM orders WHERE userId = u.id)`
-→ `WHERE NOT EXISTS (SELECT 1 FROM orders WHERE userId = u.id)`
-
-### IN (SELECT ...):
-```js
-users.find({ id: { $inSelect: orders.distinct('userId', { status: 'active' }) } })
-```
-→ `WHERE id IN (SELECT DISTINCT userId FROM orders WHERE status = 'active')`
-
-### ANY / ALL with subquery:
-```js
-users.find({ salary: { $gtAny: { collection: 'managers', field: 'salary' } } })
-users.find({ salary: { $gtAll: { collection: 'managers', field: 'salary' } } })
-```
-→ `WHERE salary > ANY (SELECT salary FROM managers)`
-→ `WHERE salary > ALL (SELECT salary FROM managers)`
+| Type | Input | Output SQL |
+|---|---|---|
+| Scalar | `{ $subquery: { collection, fn, filter } }` in projection | `(SELECT COUNT(*) FROM "orders" WHERE …) AS alias` |
+| Inline view | `options.from: { subquery: QueryBuilder, as }` | `FROM (SELECT …) alias` |
+| Correlated | `where: { field: '$outer.field' }` in subquery | `WHERE f > (SELECT AVG(f) … WHERE x = outer.x)` |
+| EXISTS | `{ $exists: { collection, match } }` | `WHERE EXISTS (SELECT 1 FROM … WHERE …)` |
+| NOT EXISTS | `{ $notExists: … }` | `WHERE NOT EXISTS …` |
+| IN SELECT | `{ $inSelect: QueryBuilder }` | `WHERE "id" IN (SELECT …)` |
+| ANY / ALL | `{ $gtAny/$gtAll: { collection, field } }` | `> ANY/ALL (SELECT …)` |
 
 ---
 
-## 📋 CATEGORY 14 — CTEs (in `cteBuilder.js`)
+## PART 18 — CATEGORY 14: CTEs (`pipeline/cteBuilder.js`)
 
-**Exposed as a standalone `withCTE(db, namedQueryBuilders)` function, not as `db.withCTE()`.**
+Exported as **standalone functions** — not methods on `db`.
 
-### Regular CTE:
-```js
-const { withCTE } = require('./oracle-mongo-wrapper');
+**`withCTE(db, { name: QueryBuilder, … })`** → `CTEBuilder`
+- Chains: `.from(cteName)`, `.join(…)`, `.where(filter)`, `.project(…)`, `.sort(…)`, `.limit(n)`, `.toArray()`
+- CTEs ordered topologically — later ones may reference earlier ones.
+- SQL built once at terminal call — O(s) where s = CTE count.
+- Execution: `db.withConnection()`.
 
-const result = await withCTE(db, {
-  active_users:  users.find({ status: 'active' }),
-  recent_orders: orders.find({ createdAt: { $gte: '2024-01-01' } })
-})
-.from('active_users')
-.join({
-  from: 'recent_orders',
-  localField: 'id',
-  foreignField: 'userId',
-  joinType: 'inner'
-})
-.toArray()
-```
-→
 ```sql
-WITH active_users AS (SELECT * FROM users WHERE status = :s0),
-     recent_orders AS (SELECT * FROM orders WHERE createdAt >= :d0)
-SELECT * FROM active_users
-INNER JOIN recent_orders ON active_users.id = recent_orders.userId
+WITH "active_users" AS (SELECT * FROM "users" WHERE "status" = :s0),
+     "recent_orders" AS (SELECT * FROM "orders" WHERE "createdAt" >= :d0)
+SELECT * FROM "active_users"
+INNER JOIN "recent_orders" ON "active_users"."id" = "recent_orders"."userId"
 ```
 
-### Recursive CTE (for hierarchies/trees):
-```js
-const { withRecursiveCTE } = require('./oracle-mongo-wrapper');
+**`withRecursiveCTE(db, name, { anchor: QueryBuilder, recursive: { collection, joinOn } })`**
 
-await withRecursiveCTE(db, 'org_tree', {
-  anchor:    employees.find({ managerId: null }),
-  recursive: {
-    collection: 'employees',
-    joinOn: { managerId: '$org_tree.id' }
-  }
-}).toArray()
-```
-→
 ```sql
-WITH org_tree (id, name, managerId, lvl) AS (
-  SELECT id, name, managerId, 1 AS lvl FROM employees WHERE managerId IS NULL
+WITH "org_tree" ("id","name","managerId","lvl") AS (
+  SELECT "id","name","managerId", 1 AS "lvl" FROM "employees" WHERE "managerId" IS NULL
   UNION ALL
-  SELECT e.id, e.name, e.managerId, o.lvl + 1
-  FROM employees e
-  JOIN org_tree o ON e.managerId = o.id
+  SELECT e."id", e."name", e."managerId", o."lvl" + 1
+  FROM "employees" e JOIN "org_tree" o ON e."managerId" = o."id"
 )
-SELECT * FROM org_tree
+SELECT * FROM "org_tree"
 ```
-
-### Multiple Chained CTEs:
-- `withCTE()` accepts an object of named QueryBuilders
-- CTEs are ordered topologically (later CTEs can reference earlier ones)
-- Execution uses `db.withConnection()` from the provided `db` argument
 
 ---
 
-## 📐 CATEGORY 15 — Window Functions (in `windowFunctions.js`)
+## PART 19 — CATEGORY 15: Window Functions (`pipeline/windowFunctions.js`)
 
-Used inside `$addFields` or `$project` pipeline stages:
+Used inside `$addFields` / `$project` via `{ $window: { … } }` expressions.
 
 ```js
-await orders.aggregate([
-  {
-    $addFields: {
-      rowNum:    { $window: { fn: 'ROW_NUMBER', partitionBy: 'customerId', orderBy: { date: -1 } } },
-      rnk:       { $window: { fn: 'RANK',       partitionBy: 'customerId', orderBy: { amount: -1 } } },
-      denseRnk:  { $window: { fn: 'DENSE_RANK', partitionBy: 'region',    orderBy: { sales: -1 } } },
-      quartile:  { $window: { fn: 'NTILE', n: 4, orderBy: { salary: 1 } } },
-      prevAmt:   { $window: { fn: 'LAG',         field: 'amount', offset: 1, partitionBy: 'customerId' } },
-      nextAmt:   { $window: { fn: 'LEAD',        field: 'amount', offset: 1, partitionBy: 'customerId' } },
-      firstVal:  { $window: { fn: 'FIRST_VALUE', field: 'amount', partitionBy: 'customerId', orderBy: { date: 1 } } },
-      lastVal:   { $window: { fn: 'LAST_VALUE',  field: 'amount', partitionBy: 'customerId', orderBy: { date: 1 } } },
-      nthVal:    { $window: { fn: 'NTH_VALUE',   field: 'amount', n: 3, orderBy: { date: 1 } } },
-      runSum:    { $window: { fn: 'SUM',   field: 'amount', partitionBy: 'customerId', orderBy: { date: 1 } } },
-      movingAvg: { $window: { fn: 'AVG',   field: 'amount', partitionBy: 'region',    orderBy: { date: 1 } } },
-      runCount:  { $window: { fn: 'COUNT', field: '*',      partitionBy: 'region' } }
-    }
-  }
-])
+{ fn: 'ROW_NUMBER', partitionBy: 'customerId', orderBy: { date: -1 } }
+{ fn: 'LAG', field: 'amount', offset: 1, partitionBy: 'customerId' }
+{ fn: 'SUM', field: 'amount', partitionBy: 'region', orderBy: { date: 1 },
+  frame: 'ROWS BETWEEN 2 PRECEDING AND CURRENT ROW' }
+{ fn: 'COUNT', field: '*', partitionBy: 'region' }
 ```
 
-**Frame clause support:**
-```js
-{ fn: 'SUM', field: 'amount', frame: 'ROWS BETWEEN 2 PRECEDING AND CURRENT ROW' }
-{ fn: 'AVG', field: 'amount', frame: 'RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW' }
-```
-
-Translates to:
-```sql
-ROW_NUMBER()    OVER (PARTITION BY customerId ORDER BY date DESC)
-RANK()          OVER (PARTITION BY customerId ORDER BY amount DESC)
-LAG(amount, 1)  OVER (PARTITION BY customerId)
-SUM(amount)     OVER (PARTITION BY customerId ORDER BY date ASC)
-SUM(amount)     OVER (PARTITION BY customerId ORDER BY date ASC ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
-```
+Supported functions: `ROW_NUMBER, RANK, DENSE_RANK, NTILE, LAG, LEAD, FIRST_VALUE, LAST_VALUE, NTH_VALUE, SUM, AVG, COUNT, MIN, MAX`
 
 **Rules:**
-- `partitionBy` is optional (omit → no PARTITION BY clause)
-- `orderBy` is required for ranking/navigation functions — throw if missing
-- `fn: 'COUNT', field: '*'` → `COUNT(*) OVER (...)`
+- `partitionBy` optional — omit `PARTITION BY` clause if absent.
+- `orderBy` required for all ranking and navigation functions — throw with function name if missing.
+- `COUNT` with `field: '*'` → `COUNT(*) OVER (…)`.
+- Build the entire `fn(…) OVER (PARTITION BY … ORDER BY … frame)` in a single O(1) pass.
 
 ---
 
-## 📊 CATEGORY 16 — Advanced Grouping
+## PART 20 — CATEGORY 17: DCL (`schema/OracleDCL.js`)
 
-Extend `$group` stage in `aggregatePipeline.js`:
+**`grant(privileges[], on, to)`** → `GRANT SELECT, INSERT ON "table" TO "user"`
 
-### `$rollup`:
-```js
-{ $group: { _id: { $rollup: ['region', 'product'] }, total: { $sum: '$amount' } } }
-```
-→ `GROUP BY ROLLUP(region, product)`
+**`revoke(privileges[], on, from)`** → `REVOKE DELETE ON "table" FROM "user"`
 
-### `$cube`:
-```js
-{ $group: { _id: { $cube: ['region', 'product', 'quarter'] }, total: { $sum: '$amount' } } }
-```
-→ `GROUP BY CUBE(region, product, quarter)`
-
-### `$groupingSets`:
-```js
-{ $group: { _id: { $groupingSets: [['region', 'product'], ['region'], []] }, total: { $sum: '$amount' } } }
-```
-→ `GROUP BY GROUPING SETS((region, product), (region), ())`
-
-### Standalone `$having`:
-```js
-await sales.aggregate([
-  { $group: { _id: '$region', total: { $sum: '$amount' } } },
-  { $having: { total: { $gt: 10000 } } }
-])
-```
-→ `HAVING SUM(amount) > :v0`
+Privileges and object names are sanitized via allowlist or `quoteIdentifier` — never interpolated raw.
 
 ---
 
-## 🔐 CATEGORY 17 — DCL Operations (in `OracleDCL.js`)
+## PART 21 — CATEGORY 19: Oracle Advanced Features (`advanced/oracleAdvanced.js`)
 
-### `grant(privileges[], on, to)`
-```js
-await dcl.grant(['SELECT', 'INSERT', 'UPDATE'], 'orders', 'app_user')
-await dcl.grant(['EXECUTE'], 'my_procedure', 'app_role')
-```
-→ `GRANT SELECT, INSERT, UPDATE ON orders TO app_user`
+Methods on `OracleCollection` unless noted.
 
-### `revoke(privileges[], on, from)`
-```js
-await dcl.revoke(['DELETE', 'UPDATE'], 'orders', 'app_user')
+**`connectBy(options)`**
+Options: `startWith` (filter), `connectBy` (relation), `orderSiblings` (sort), `maxLevel`, `includeLevel`, `includePath`
+```sql
+SELECT LEVEL, SYS_CONNECT_BY_PATH("name", '/') AS "path", t.*
+FROM "employees" t
+START WITH "managerId" IS NULL
+CONNECT BY NOCYCLE PRIOR "id" = "managerId"
+ORDER SIBLINGS BY "name" ASC
 ```
-→ `REVOKE DELETE, UPDATE ON orders FROM app_user`
+
+**`pivot(options)`** — `value`, `pivotOn`, `pivotValues[]`, `groupBy`
+```sql
+SELECT * FROM (SELECT "region","quarter","amount" FROM "sales")
+PIVOT (SUM("amount") FOR "quarter" IN ('Q1' AS Q1,'Q2' AS Q2,'Q3' AS Q3,'Q4' AS Q4))
+```
+
+**`unpivot(options)`** — `valueColumn`, `nameColumn`, `columns[]`, `includeNulls`
+→ `UNPIVOT [INCLUDE|EXCLUDE] NULLS ("amount" FOR "quarter" IN (Q1,Q2,Q3,Q4))`
+
+`FOR UPDATE` and `AS OF` are surfaced via `find()` options (`forUpdate`, `asOf`) and `QueryBuilder` methods — not standalone methods.
+
+**Lateral join** is surfaced via `$lateralJoin` in `aggregate()`:
+```sql
+SELECT u.*, ro.* FROM "users" u,
+LATERAL (SELECT * FROM "orders" WHERE "userId" = u."id" ORDER BY "date" DESC FETCH FIRST 3 ROWS ONLY) ro
+```
+
+**`TABLESAMPLE`** is surfaced via `find({}, { sample: { percentage, seed? } })`:
+→ `SELECT * FROM "users" SAMPLE(:pct) [SEED(:seed)]`
 
 ---
 
-## 🔶 CATEGORY 19 — Oracle Advanced Features (in `oracleAdvanced.js`)
+## PART 22 — CATEGORY 20: Performance Utilities (`advanced/performanceUtils.js`)
 
-### CONNECT BY (Hierarchical Queries):
-```js
-await employees.connectBy({
-  startWith:     { managerId: null },
-  connectBy:     { managerId: '$PRIOR id' },
-  orderSiblings: { name: 1 },
-  maxLevel:      10,
-  includeLevel:  true,
-  includePath:   true
-})
-```
-→
+Exported as `createPerformance(db)` factory — not as `db.performance`.
+
+**`explainPlan(queryBuilderOrSQL)`** → `Array`
+Calls `.explain()` on `QueryBuilder` to get SQL, then:
 ```sql
-SELECT LEVEL, SYS_CONNECT_BY_PATH(name, '/') AS path, e.*
-FROM employees e
-START WITH managerId IS NULL
-CONNECT BY NOCYCLE PRIOR id = managerId
-ORDER SIBLINGS BY name ASC
-```
-
-### PIVOT:
-```js
-await sales.pivot({
-  value:       { $sum: '$amount' },
-  pivotOn:     'quarter',
-  pivotValues: ['Q1', 'Q2', 'Q3', 'Q4'],
-  groupBy:     'region'
-})
-```
-→
-```sql
-SELECT * FROM (SELECT region, quarter, amount FROM sales)
-PIVOT (SUM(amount) FOR quarter IN ('Q1' AS Q1,'Q2' AS Q2,'Q3' AS Q3,'Q4' AS Q4))
-```
-
-### UNPIVOT:
-```js
-await salesPivoted.unpivot({
-  valueColumn:  'amount',
-  nameColumn:   'quarter',
-  columns:      ['Q1', 'Q2', 'Q3', 'Q4'],
-  includeNulls: false
-})
-```
-→ `SELECT * FROM sales_pivoted UNPIVOT EXCLUDE NULLS (amount FOR quarter IN (Q1,Q2,Q3,Q4))`
-
-### FOR UPDATE (Row Locking):
-```js
-await users.find({ status: 'active' }, { forUpdate: true }).toArray()
-await users.find({ id: 5 }, { forUpdate: 'nowait' }).toArray()
-await users.find({ id: 5 }, { forUpdate: 'skip locked' }).toArray()
-```
-→ `FOR UPDATE` / `FOR UPDATE NOWAIT` / `FOR UPDATE SKIP LOCKED`
-
-### RETURNING Clause:
-```js
-await users.insertOne({ name: 'Ana' }, { returning: ['id', 'createdAt'] })
-await users.updateOne({ id: 5 }, { $set: { name: 'Ana' } }, { returning: ['name', 'updatedAt'] })
-await users.deleteOne({ id: 5 }, { returning: ['id', 'name'] })
-```
-→ `INSERT INTO users (...) VALUES (...) RETURNING id, createdAt INTO :out_id, :out_createdAt`
-- Returned values come back in `result.returning` object
-
-### AS OF — Flashback / Temporal Queries:
-```js
-await orders.find({ status: 'pending' }, { asOf: { scn: 1234567 } })
-await orders.find({ status: 'pending' }, { asOf: { timestamp: '2024-06-01 10:00:00' } })
-```
-→ `SELECT * FROM orders AS OF SCN 1234567 WHERE ...`
-→ `SELECT * FROM orders AS OF TIMESTAMP TO_TIMESTAMP(:ts, 'YYYY-MM-DD HH24:MI:SS') WHERE ...`
-
-### LATERAL JOIN:
-```js
-await users.aggregate([
-  {
-    $lateralJoin: {
-      subquery: orders.find({ userId: '$outer.id' }).sort({ date: -1 }).limit(3),
-      as: 'recentOrders'
-    }
-  }
-])
-```
-→
-```sql
-SELECT u.*, ro.*
-FROM users u,
-LATERAL (
-  SELECT * FROM orders WHERE userId = u.id ORDER BY date DESC FETCH FIRST 3 ROWS ONLY
-) ro
-```
-
-### TABLESAMPLE:
-```js
-await users.find({}, { sample: { percentage: 10 } })
-await users.find({}, { sample: { percentage: 5, seed: 42 } })
-```
-→ `SELECT * FROM users SAMPLE(10)` / `SELECT * FROM users SAMPLE(5) SEED(42)`
-
----
-
-## ⚡ CATEGORY 20 — Performance Utilities (in `performanceUtils.js`)
-
-**Exposed as `createPerformance(db)` factory, not as `db.performance`.**
-
-```js
-const { createPerformance } = require('./oracle-mongo-wrapper');
-const performance = createPerformance(db);
-```
-
-### `performance.explainPlan(queryBuilderOrSQL)` → `Array`
-```js
-await performance.explainPlan(users.find({ status: 'active' }).sort({ name: 1 }))
-```
-→
-```sql
-EXPLAIN PLAN FOR <generated SQL>;
+EXPLAIN PLAN FOR <sql>;
 SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', NULL, 'ALL'));
 ```
 
-### `performance.analyze(tableName)` → `void`
-```js
-await performance.analyze('orders')
-```
-→ `DBMS_STATS.GATHER_TABLE_STATS(USER, 'ORDERS', CASCADE => TRUE)`
+**`analyze(tableName)`** → `void`
+`DBMS_STATS.GATHER_TABLE_STATS(USER, UPPER(:t), CASCADE => TRUE)`
 
-### `performance.createMaterializedView(name, queryBuilderOrSQL, options)` → `{ acknowledged }`
-```js
-await performance.createMaterializedView('mv_sales_summary',
-  sales.aggregate([{ $group: { _id: '$region', total: { $sum: '$amount' } } }]),
-  {
-    refreshMode: 'fast',      // 'fast' | 'complete' | 'force'
-    refreshOn:   'commit',    // 'commit' | 'demand'
-    buildMode:   'immediate', // 'immediate' | 'deferred'
-    orReplace:   true
-  }
-)
-```
+**`createMaterializedView(name, queryBuilderOrSQL, options)`** → `{ acknowledged }`
+Options: `refreshMode ('fast'|'complete'|'force')`, `refreshOn ('commit'|'demand')`, `buildMode ('immediate'|'deferred')`, `orReplace`
 
-### `performance.refreshMaterializedView(name, mode)` → `void`
-```js
-await performance.refreshMaterializedView('mv_sales_summary', 'complete')
-```
-→ `DBMS_MVIEW.REFRESH('MV_SALES_SUMMARY', 'C')`
+**`refreshMaterializedView(name, mode)`** → `void`
+`DBMS_MVIEW.REFRESH(UPPER(:n), :m)`
 
-### `performance.dropMaterializedView(name)` → `{ acknowledged }`
-→ `DROP MATERIALIZED VIEW <name>`
+**`dropMaterializedView(name)`** → `{ acknowledged }` — `DROP MATERIALIZED VIEW "name"`
 
 ---
 
-## 📤 CATEGORY 21 — INSERT INTO ... SELECT (in `OracleCollection.js`)
+## PART 23 — CATEGORY 21: INSERT INTO … SELECT (`OracleCollection`)
 
-### `insertFromQuery(targetTable, queryBuilder, options)` → `{ acknowledged, insertedCount }`
-```js
-await users.insertFromQuery('archive_orders',
-  orders.find({ status: 'completed', year: 2023 })
-)
-```
-→ `INSERT INTO archive_orders SELECT * FROM orders WHERE status = :s0 AND year = :y0`
-
-**With column mapping:**
-```js
-await users.insertFromQuery('summary',
-  orders.aggregate([{ $group: { _id: '$region', total: { $sum: '$amount' } } }]),
-  { columns: ['region', 'total_sales'] }
-)
-```
-→ `INSERT INTO summary (region, total_sales) SELECT region, SUM(amount) FROM orders GROUP BY region`
+**`insertFromQuery(targetTable, queryBuilder, options)`** → `{ acknowledged, insertedCount }`
+Calls `queryBuilder.explain()` to get source SQL — **no JS buffering, pure SQL passthrough**.
+`options.columns[]` → `INSERT INTO "target" ("col1","col2") SELECT …`
+`result.rowsAffected` → `insertedCount`
 
 ---
 
-## 🔁 CATEGORY 22 — UPDATE ... JOIN (in `OracleCollection.js`)
+## PART 24 — CATEGORY 22: UPDATE … JOIN (`OracleCollection`)
 
-### `updateFromJoin(options)` → `{ acknowledged, modifiedCount }`
-```js
-await users.updateFromJoin({
-  target: 'employees',
-  join: {
-    table: 'salary_adjustments',
-    on:    { 'employees.id': 'salary_adjustments.empId' },
-    type:  'inner'
-  },
-  set:   { 'employees.salary': '$salary_adjustments.newSalary' },
-  where: { 'salary_adjustments.approved': 1 }
-})
-```
-→
+**`updateFromJoin(options)`** → `{ acknowledged, modifiedCount }`
+
+Oracle's updateable inline view pattern:
 ```sql
 UPDATE (
-  SELECT e.salary AS old_salary, s.newSalary AS new_salary
-  FROM employees e
-  INNER JOIN salary_adjustments s ON e.id = s.empId
-  WHERE s.approved = :v0
-)
-SET old_salary = new_salary
+  SELECT e."salary" AS old_sal, s."newSalary" AS new_sal
+  FROM "employees" e
+  INNER JOIN "salary_adjustments" s ON e."id" = s."empId"
+  WHERE s."approved" = :v0
+) SET old_sal = new_sal
 ```
 
-> Note: Oracle does not support `UPDATE ... FROM JOIN` directly. Use the updateable inline view pattern shown above. If the join is not key-preserved (Oracle ORA-01779), fall back to a correlated UPDATE subquery and document this clearly.
+If the join is not key-preserved (ORA-01779), fall back to a correlated `UPDATE` subquery and document the fallback clearly in both code and README.
 
 ---
 
-## ✅ CRITICAL IMPLEMENTATION RULES
-
-1. **Never use string interpolation for user values** — always bind variables
-2. **Never manage connection lifecycle manually** — always use `db.withConnection()` or `db.withTransaction()`. The existing adapter handles release, health monitoring, slow-op logging, and retries.
-3. **Connection pattern inside every method:**
-   ```js
-   async someMethod(filter, options = {}) {
-     return this._execute(async (conn) => {
-       const sql = `...`;
-       try {
-         const result = await conn.execute(sql, binds, {
-           outFormat: this.db.oracledb.OUT_FORMAT_OBJECT,
-           autoCommit: false  // let the adapter or transaction handle commit
-         });
-         return result;
-       } catch (err) {
-         throw new Error(`[OracleCollection.someMethod] ${err.message}\nSQL: ${sql}`);
-       }
-     });
-   }
-   ```
-4. **Bind variable naming** — use unique suffixed names to avoid collisions:
-   - Filter binds: `where_field_0`, `where_field_1`
-   - Update binds: `upd_field_0`
-   - Output binds: `out_field_0`
-5. **Oracle reserved words** — wrap all column and table names in double quotes: `"tableName"."columnName"`
-6. **Case sensitivity** — always use `UPPER()` when querying system tables like `USER_TABLES`, `USER_INDEXES`
-7. **Empty results** — `findOne` and `findOneAndDelete` return `null` (not `undefined`) when no rows match
-8. **Row counts** — use `result.rowsAffected` from oracledb for `modifiedCount`/`deletedCount`
-9. **Date handling** — always bind JavaScript `Date` objects directly (oracledb handles conversion). For string dates, use `TO_DATE` or `TO_TIMESTAMP` in SQL
-10. **Number precision** — Oracle `NUMBER` columns return JavaScript strings for large numbers. Add a `utils.convertTypes()` helper that coerces them back to `Number`
-11. **`executeMany` options** — always pass `{ autoCommit: false, bindDefs: {...} }` — commit is handled by `db.withTransaction()`
-12. **`autoCommit`** — set `autoCommit: false` on all `conn.execute()` calls inside `withTransaction()`. For standalone reads, `autoCommit` does not matter but set it to `true` for clarity.
-
----
-
-## 📌 COMPLETE USAGE EXAMPLE
+## PART 25 — `index.js` — Canonical Barrel
 
 ```js
-const {
-  createDb,
-  OracleCollection,
-  OracleSchema,
-  OracleDCL,
-  Transaction,
-  withCTE,
-  withRecursiveCTE,
-  createPerformance,
-} = require('./oracle-mongo-wrapper');
-
-// Bind to named connections from src/config/database.js
-// Pool is already initialized by the existing adapter — no initPool() needed
-const db          = createDb('userAccount');
-const inventoryDb = createDb('unitInventory');
-
-const users     = new OracleCollection('users',     db);
-const orders    = new OracleCollection('orders',    db);
-const employees = new OracleCollection('employees', db);
-const sales     = new OracleCollection('sales',     db);
-const schema    = new OracleSchema(db);
-const dcl       = new OracleDCL(db);
-const txManager = new Transaction(db);
-const perf      = createPerformance(db);
-
-// --- DDL ---
-await schema.createTable('users', {
-  id:        { type: 'NUMBER',        primaryKey: true, autoIncrement: true },
-  name:      { type: 'VARCHAR2(200)', notNull: true },
-  email:     { type: 'VARCHAR2(300)', notNull: true },
-  status:    { type: 'VARCHAR2(20)',  default: "'active'" },
-  createdAt: { type: 'DATE',          default: 'SYSDATE' }
-});
-
-// --- Insert ---
-await users.insertOne({ name: 'Juan', email: 'juan@email.com', status: 'active' });
-await users.insertMany([
-  { name: 'Maria', email: 'maria@email.com' },
-  { name: 'Pedro', email: 'pedro@email.com' }
-]);
-
-// --- Find with chaining ---
-const activeUsers = await users
-  .find({ status: 'active', age: { $gte: 18 } })
-  .sort({ name: 1 })
-  .skip(0)
-  .limit(10)
-  .project({ name: 1, email: 1 })
-  .toArray();
-
-// --- Update ---
-await users.updateOne({ name: 'Juan' }, {
-  $set:         { status: 'premium' },
-  $inc:         { loginCount: 1 },
-  $currentDate: { updatedAt: true }
-});
-
-// --- Delete ---
-await users.deleteOne({ status: 'inactive' });
-
-// --- Aggregation with window function ---
-const report = await orders.aggregate([
-  { $match:     { status: 'completed' } },
-  { $group:     { _id: '$region', total: { $sum: '$amount' }, count: { $count: '*' } } },
-  { $addFields: { rank: { $window: { fn: 'RANK', orderBy: { total: -1 } } } } },
-  { $sort:      { total: -1 } },
-  { $limit:     5 }
-]);
-
-// --- JOIN ---
-const orderDetails = await orders.aggregate([
-  { $match: { status: 'active' } },
-  { $lookup: { from: 'customers', localField: 'customerId', foreignField: 'id', as: 'customer', joinType: 'left' } },
-  { $lookup: { from: 'products',  localField: 'productId',  foreignField: 'id', as: 'product',  joinType: 'inner' } }
-]);
-
-// --- UNION ---
-const allVipUsers = await OracleCollection.union(
-  users.find({ tier: 'gold' }),
-  users.find({ tier: 'platinum' }),
-  { all: false }
-);
-
-// --- CTE ---
-const cteResult = await withCTE(db, {
-  high_value_orders: orders.find({ amount: { $gte: 1000 } }),
-  vip_customers:     users.find({ tier: 'platinum' })
-})
-.from('high_value_orders')
-.join({ from: 'vip_customers', localField: 'customerId', foreignField: 'id', joinType: 'inner' })
-.toArray();
-
-// --- Transaction with savepoint ---
-await txManager.withTransaction(async (session) => {
-  const u = session.collection('users');
-  const o = session.collection('orders');
-
-  await u.updateOne({ id: 5 }, { $set: { balance: 500 } });
-  await session.savepoint('after_balance');
-
-  try {
-    await o.insertOne({ userId: 5, amount: 999, status: 'pending' });
-  } catch (err) {
-    await session.rollbackTo('after_balance');
-  }
-});
-
-// --- Oracle Advanced: CONNECT BY ---
-const orgTree = await employees.connectBy({
-  startWith:     { managerId: null },
-  connectBy:     { managerId: '$PRIOR id' },
-  orderSiblings: { name: 1 },
-  includeLevel:  true,
-  includePath:   true
-});
-
-// --- PIVOT ---
-const pivotResult = await sales.pivot({
-  value:       { $sum: '$amount' },
-  pivotOn:     'quarter',
-  pivotValues: ['Q1', 'Q2', 'Q3', 'Q4'],
-  groupBy:     'region'
-});
-
-// --- Explain Plan ---
-await perf.explainPlan(
-  users.find({ status: 'active' }).sort({ createdAt: -1 }).limit(100)
-);
-
-// --- DCL ---
-await dcl.grant(['SELECT', 'INSERT'], 'orders', 'app_user');
-await dcl.revoke(['DELETE'], 'orders', 'app_user');
-
-// --- Merge ---
-await employees.merge(
-  { id: 10, name: 'Ana', salary: 60000 },
-  { localField: 'id', foreignField: 'id' },
-  {
-    whenMatched:    { $set: { salary: 60000 } },
-    whenNotMatched: 'insert'
-  }
-);
-
-// Shutdown — delegates to the existing adapter's closeAll()
-await db.closePool();
+'use strict';
+module.exports = {
+  // Factory
+  createDb:            require('./db').createDb,
+  // Core
+  OracleCollection:    require('./core/OracleCollection').OracleCollection,
+  QueryBuilder:        require('./core/QueryBuilder').QueryBuilder,
+  // Schema
+  OracleSchema:        require('./schema/OracleSchema').OracleSchema,
+  OracleDCL:           require('./schema/OracleDCL').OracleDCL,
+  // Transactions
+  Transaction:         require('./Transaction').Transaction,
+  // Pipeline helpers (standalone, accept db as first arg)
+  withCTE:             require('./pipeline/cteBuilder').withCTE,
+  withRecursiveCTE:    require('./pipeline/cteBuilder').withRecursiveCTE,
+  // Performance (factory, accepts db)
+  createPerformance:   require('./advanced/performanceUtils').createPerformance,
+};
 ```
 
 ---
 
-## 📄 DELIVERABLES
+## PART 26 — DELIVERABLES (in dependency order)
 
-Generate all of the following files in dependency order:
+| # | File | Key exports |
+|---|---|---|
+| 1 | `db.js` | `createDb` |
+| 2 | `utils.js` | `quoteIdentifier, mergeBinds, convertTypes, rowToDoc, chunkArray, buildBindDefs` |
+| 3 | `parsers/filterParser.js` | `parseFilter(filter) → { whereClause, binds }` |
+| 4 | `parsers/updateParser.js` | `parseUpdate(update) → { setClause, binds }` |
+| 5 | `core/QueryBuilder.js` | `QueryBuilder` |
+| 6 | `Transaction.js` | `Transaction`, `Session` |
+| 7 | `core/OracleCollection.js` | `OracleCollection` |
+| 8 | `schema/OracleSchema.js` | `OracleSchema` |
+| 9 | `schema/OracleDCL.js` | `OracleDCL` |
+| 10 | `pipeline/aggregatePipeline.js` | `buildPipeline(stages, tableName, db)` |
+| 11 | `pipeline/windowFunctions.js` | `buildWindowExpr(expr)` |
+| 12 | `joins/joinBuilder.js` | `buildJoin(lookup)` |
+| 13 | `joins/setOperations.js` | `SetOperationBuilder` |
+| 14 | `pipeline/cteBuilder.js` | `withCTE`, `withRecursiveCTE` |
+| 15 | `pipeline/subqueryBuilder.js` | `buildSubquery(spec, alias)` |
+| 16 | `advanced/oracleAdvanced.js` | `connectBy`, `pivot`, `unpivot` |
+| 17 | `advanced/performanceUtils.js` | `createPerformance` |
+| 18 | `index.js` | All public exports |
+| 19 | `package.json` | devDeps: `mocha`, `chai` — `oracledb` inherited from parent |
+| 20 | `README.md` | One working example per category, including SQL output |
+| 21 | `test.js` | End-to-end mocha + chai tests using `createDb('userAccount')` |
+| 22 | `CHANGELOG.md` | v1.0.0 with full feature list |
 
-1. `db.js` — thin adapter factory (`createDb`) only — no pool management
-2. `utils.js` — shared helpers: `convertTypes`, `rowToDoc`, `quoteIdentifier`, `mergeBinds`
-3. `filterParser.js`
-4. `updateParser.js`
-5. `QueryBuilder.js`
-6. `Transaction.js` — Session class with `_conn` override pattern
-7. `OracleCollection.js` — all CRUD + advanced methods using `this._execute()`
-8. `OracleSchema.js`
-9. `OracleDCL.js`
-10. `aggregatePipeline.js`
-11. `windowFunctions.js`
-12. `joinBuilder.js`
-13. `setOperations.js`
-14. `cteBuilder.js` — exports `withCTE(db, cteDefs)` and `withRecursiveCTE(db, name, def)`
-15. `subqueryBuilder.js`
-16. `oracleAdvanced.js`
-17. `performanceUtils.js` — exports `createPerformance(db)`
-18. `index.js` — barrel file re-exporting everything
-19. `package.json` — add `mocha` and `chai` as devDependencies; `oracledb` is already in the parent project
-20. `README.md` — one usage example per category
-21. `test.js` — end-to-end tests using `mocha` + `chai`, using `createDb('userAccount')`
-22. `CHANGELOG.md` — version 1.0.0 listing all implemented features
+---
 
-# Final note: Ensure all SQL queries are properly parameterized and tested against an actual Oracle database to validate syntax and behavior. Pay special attention to edge cases, such as empty results, null values, and complex joins.
+## PART 27 — PRE-SUBMISSION CHECKLIST
 
-## END OF SPECIFICATION
+Before outputting any file, verify every item:
 
-## Testing and Validation
+**SQL Safety**
+- [ ] Zero string-interpolated user values — every value is a bind variable
+- [ ] All identifiers are `"DOUBLE_QUOTED"` and uppercase
+- [ ] `UPPER(:bind)` used on all system table queries
+- [ ] `autoCommit: false` inside transactions; `true` for standalone reads
+- [ ] `outFormat: OUT_FORMAT_OBJECT` on every `conn.execute()` call
 
+**Performance**
+- [ ] `insertMany` uses `executeMany` with `chunkArray(docs, 500)` — never loops `insertOne`
+- [ ] `forEach` uses `conn.queryStream()` — never buffers
+- [ ] `estimatedDocumentCount` queries `USER_TABLES.NUM_ROWS`, not `COUNT(*)`
+- [ ] `getIndexes` uses a single JOIN query — no N+1
+- [ ] Adjacent `$match` stages are collapsed before CTE construction
+- [ ] No pass-through CTE stages (`SELECT * FROM prev` with no transformation)
+- [ ] `buildBindDefs` called once per `executeMany` batch, not per row
+- [ ] `mergeBinds()` used for all bind merging — no `Object.assign` spread chains
 
+**Error Handling**
+- [ ] Every `catch` rethrows `[ClassName.methodName] msg\nSQL: …\nBinds: …`
+- [ ] `findOne` / `findOneAnd*` return `null` on no match — never `undefined`
 
+**Architecture**
+- [ ] Every method uses `_execute()`, `db.withConnection()`, or `db.withTransaction()` — no manual pool calls
+- [ ] `bulkWrite` and `insertMany` use `db.withTransaction()` — all ops or nothing
+- [ ] Session-bound `OracleCollection` (`_conn` set) skips `withConnection()` entirely
+- [ ] JSDoc on every public method: params, return type, SQL example

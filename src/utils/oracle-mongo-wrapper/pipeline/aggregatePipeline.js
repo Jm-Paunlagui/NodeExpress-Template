@@ -8,12 +8,17 @@
 const { quoteIdentifier } = require("../utils");
 const { parseFilter } = require("../parsers/filterParser");
 
-let _bindCounter = 0;
-function _nextBind(prefix) {
-    return `${prefix}_${_bindCounter++}`;
-}
-function _resetCounter() {
-    _bindCounter = 0;
+/**
+ * Create a per-call counter for unique bind variable names.
+ * @returns {{ next: (prefix: string) => string }}
+ */
+function _createCounter() {
+    let c = 0;
+    return {
+        next(prefix) {
+            return `${prefix}_${c++}`;
+        },
+    };
 }
 
 /**
@@ -24,7 +29,7 @@ function _resetCounter() {
  * @returns {{ sql: string, binds: Object }}
  */
 function buildAggregateSQL(tableName, pipeline, db) {
-    _resetCounter();
+    const counter = _createCounter();
     const ctes = [];
     const allBinds = {};
     let prevSource = quoteIdentifier(tableName);
@@ -59,6 +64,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
                     stage.$group,
                     prevSource,
                     stage._having,
+                    counter,
                 );
                 Object.assign(allBinds, binds);
                 ctes.push({ alias: stageAlias, sql });
@@ -99,7 +105,11 @@ function buildAggregateSQL(tableName, pipeline, db) {
             }
 
             case "$project": {
-                const projCols = _buildProjectCols(stage.$project);
+                const { cols: projCols, binds: projBinds } = _buildProjectCols(
+                    stage.$project,
+                    counter,
+                );
+                Object.assign(allBinds, projBinds);
                 ctes.push({
                     alias: stageAlias,
                     sql: `SELECT ${projCols} FROM ${prevSource}`,
@@ -110,6 +120,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
             case "$addFields": {
                 const { sql: addCols, binds: addBinds } = _buildAddFieldsCols(
                     stage.$addFields,
+                    counter,
                 );
                 Object.assign(allBinds, addBinds);
                 ctes.push({
@@ -155,7 +166,11 @@ function buildAggregateSQL(tableName, pipeline, db) {
             }
 
             case "$bucket": {
-                const { sql, binds } = _buildBucket(stage.$bucket, prevSource);
+                const { sql, binds } = _buildBucket(
+                    stage.$bucket,
+                    prevSource,
+                    counter,
+                );
                 Object.assign(allBinds, binds);
                 ctes.push({ alias: stageAlias, sql });
                 break;
@@ -244,7 +259,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
 /**
  * Build GROUP BY clause with aggregate functions.
  */
-function _buildGroup(group, source, having) {
+function _buildGroup(group, source, having, counter) {
     const binds = {};
     const selectParts = [];
     const groupByParts = [];
@@ -302,7 +317,7 @@ function _buildGroup(group, source, having) {
     const aliasToExpr = {};
     for (const [alias, expr] of Object.entries(group)) {
         if (alias === "_id") continue;
-        const aggSql = _buildAggExpr(expr, binds);
+        const aggSql = _buildAggExpr(expr, binds, counter);
         aliasToExpr[alias] = aggSql;
         selectParts.push(`${aggSql} AS ${alias.toUpperCase()}`);
     }
@@ -321,7 +336,7 @@ function _buildGroup(group, source, having) {
                 aliasToExpr[col] || quoteIdentifier(col.toUpperCase());
             if (typeof cond === "object") {
                 for (const [op, val] of Object.entries(cond)) {
-                    const bname = _nextBind("having");
+                    const bname = counter.next("having");
                     binds[bname] = val;
                     const sqlOp =
                         {
@@ -347,7 +362,7 @@ function _buildGroup(group, source, having) {
 /**
  * Build an aggregate expression (e.g. { $sum: '$amount' })
  */
-function _buildAggExpr(expr, binds) {
+function _buildAggExpr(expr, binds, counter) {
     if (typeof expr === "object") {
         for (const [op, val] of Object.entries(expr)) {
             switch (op) {
@@ -368,26 +383,26 @@ function _buildAggExpr(expr, binds) {
                 case "$mul": {
                     if (Array.isArray(val)) {
                         return val
-                            .map((v) => _fieldRefOrBind(v, binds))
+                            .map((v) => _fieldRefOrBind(v, binds, counter))
                             .join(" * ");
                     }
                     return _fieldRef(val);
                 }
                 case "$add": {
                     if (Array.isArray(val)) {
-                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" + ")})`;
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds, counter)).join(" + ")})`;
                     }
                     return _fieldRef(val);
                 }
                 case "$subtract": {
                     if (Array.isArray(val)) {
-                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" - ")})`;
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds, counter)).join(" - ")})`;
                     }
                     return _fieldRef(val);
                 }
                 case "$divide": {
                     if (Array.isArray(val)) {
-                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" / ")})`;
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds, counter)).join(" / ")})`;
                     }
                     return _fieldRef(val);
                 }
@@ -413,14 +428,16 @@ function _buildAggExpr(expr, binds) {
                 }
                 case "$cond": {
                     const { if: ifCond, then: thenVal, else: elseVal } = val;
-                    const condSql = _buildCondExpr(ifCond, binds);
-                    const thenSql = _fieldRefOrBind(thenVal, binds);
-                    const elseSql = _fieldRefOrBind(elseVal, binds);
+                    const condSql = _buildCondExpr(ifCond, binds, counter);
+                    const thenSql = _fieldRefOrBind(thenVal, binds, counter);
+                    const elseSql = _fieldRefOrBind(elseVal, binds, counter);
                     return `CASE WHEN ${condSql} THEN ${thenSql} ELSE ${elseSql} END`;
                 }
                 case "$ifNull": {
                     if (Array.isArray(val)) {
-                        const parts = val.map((v) => _fieldRefOrBind(v, binds));
+                        const parts = val.map((v) =>
+                            _fieldRefOrBind(v, binds, counter),
+                        );
                         return `COALESCE(${parts.join(", ")})`;
                     }
                     return _fieldRef(val);
@@ -448,31 +465,31 @@ function _fieldRef(val) {
     return quoteIdentifier(val);
 }
 
-function _fieldRefOrBind(val, binds) {
+function _fieldRefOrBind(val, binds, counter) {
     if (typeof val === "string" && val.startsWith("$")) {
         return quoteIdentifier(val.substring(1));
     }
     if (typeof val === "number" || typeof val === "boolean") {
-        const bname = _nextBind("agg");
+        const bname = counter.next("agg");
         binds[bname] = val;
         return `:${bname}`;
     }
     if (typeof val === "string") {
-        const bname = _nextBind("agg");
+        const bname = counter.next("agg");
         binds[bname] = val;
         return `:${bname}`;
     }
     return String(val);
 }
 
-function _buildCondExpr(cond, binds) {
+function _buildCondExpr(cond, binds, counter) {
     // Simple condition: { field: { $gt: value } }
     if (typeof cond === "object") {
         for (const [field, ops] of Object.entries(cond)) {
             const fref = _fieldRef(field.startsWith("$") ? field : `$${field}`);
             if (typeof ops === "object") {
                 for (const [op, val] of Object.entries(ops)) {
-                    const bname = _nextBind("cond");
+                    const bname = counter.next("cond");
                     binds[bname] = val;
                     const sqlOp =
                         {
@@ -486,7 +503,7 @@ function _buildCondExpr(cond, binds) {
                     return `${fref} ${sqlOp} :${bname}`;
                 }
             } else {
-                const bname = _nextBind("cond");
+                const bname = counter.next("cond");
                 binds[bname] = ops;
                 return `${fref} = :${bname}`;
             }
@@ -499,13 +516,14 @@ function _buildSortString(sortSpec) {
     return Object.entries(sortSpec)
         .map(
             ([col, dir]) =>
-                `${col.toUpperCase()} ${dir === -1 ? "DESC" : "ASC"}`,
+                `${quoteIdentifier(col.toUpperCase())} ${dir === -1 ? "DESC" : "ASC"}`,
         )
         .join(", ");
 }
 
-function _buildProjectCols(project) {
+function _buildProjectCols(project, counter) {
     const parts = [];
+    const binds = {};
     for (const [col, spec] of Object.entries(project)) {
         if (spec === 1 || spec === true) {
             parts.push(quoteIdentifier(col));
@@ -514,19 +532,19 @@ function _buildProjectCols(project) {
                 `${quoteIdentifier(spec.substring(1))} AS ${col.toUpperCase()}`,
             );
         } else if (typeof spec === "object") {
-            const expr = _buildAggExpr(spec, {});
+            const expr = _buildAggExpr(spec, binds, counter);
             parts.push(`${expr} AS ${col.toUpperCase()}`);
         }
     }
-    return parts.length > 0 ? parts.join(", ") : "*";
+    return { cols: parts.length > 0 ? parts.join(", ") : "*", binds };
 }
 
-function _buildAddFieldsCols(addFields) {
+function _buildAddFieldsCols(addFields, counter) {
     const binds = {};
     const parts = [];
     for (const [alias, spec] of Object.entries(addFields)) {
         if (typeof spec === "object") {
-            const expr = _buildAggExpr(spec, binds);
+            const expr = _buildAggExpr(spec, binds, counter);
             parts.push(`${expr} AS ${alias.toUpperCase()}`);
         } else if (typeof spec === "string" && spec.startsWith("$")) {
             parts.push(
@@ -569,15 +587,15 @@ function _buildMergeStage(merge, source) {
     return `MERGE INTO ${into} tgt USING (SELECT * FROM ${source}) src ON (${onCols}) WHEN MATCHED THEN UPDATE SET tgt.updated = SYSDATE WHEN NOT MATCHED THEN INSERT VALUES (src.*)`;
 }
 
-function _buildBucket(bucket, source) {
+function _buildBucket(bucket, source, counter) {
     const binds = {};
     const { groupBy, boundaries, default: defaultBucket, output } = bucket;
     const col = groupBy.startsWith("$") ? groupBy.substring(1) : groupBy;
     const cases = [];
 
     for (let i = 0; i < boundaries.length - 1; i++) {
-        const lo = _nextBind("bkt");
-        const hi = _nextBind("bkt");
+        const lo = counter.next("bkt");
+        const hi = counter.next("bkt");
         binds[lo] = boundaries[i];
         binds[hi] = boundaries[i + 1];
         cases.push(
@@ -593,7 +611,7 @@ function _buildBucket(bucket, source) {
 
     if (output) {
         for (const [alias, agg] of Object.entries(output)) {
-            const aggSql = _buildAggExpr(agg, binds);
+            const aggSql = _buildAggExpr(agg, binds, counter);
             selectParts.push(`${aggSql} AS ${quoteIdentifier(alias)}`);
         }
     } else {

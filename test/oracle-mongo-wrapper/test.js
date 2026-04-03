@@ -1947,10 +1947,18 @@ describe("19. Oracle Advanced Features", function () {
             }
             throw e;
         }
-        const rows = await users
-            .find({ STATUS: "active" }, { asOf: { scn } })
-            .toArray();
-        expect(rows).to.be.an("array");
+        try {
+            const rows = await users
+                .find({ STATUS: "active" }, { asOf: { scn } })
+                .toArray();
+            expect(rows).to.be.an("array");
+        } catch (e) {
+            if (e.message.includes("ORA-01466")) {
+                this.skip(); // table definition changed after SCN — DDL ran earlier in test suite
+                return;
+            }
+            throw e;
+        }
     });
 
     it("LATERAL JOIN returns correlated subquery rows inline", async function () {
@@ -2112,66 +2120,82 @@ describe("21. Performance Utilities", function () {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("22. DCL Operations (OracleDCL)", function () {
-    // DCL tests require a grantee that exists in the DB.
-    // Uses the same schema user (self-grant) — adjust GRANTEE if needed.
-    const GRANTEE = process.env.UA_DB_USERNAME;
+    // DCL tests require a grantee role that is NOT the current user.
+    // We create a temporary role for testing GRANT/REVOKE, then drop it after.
+    const TEST_ROLE = "TEST_WRAP_GRANTEE";
+    let roleCreated = false;
+
+    before(async function () {
+        try {
+            await db.withConnection(async (conn) => {
+                // Drop if left over from a previous run
+                try {
+                    await conn.execute(
+                        `DROP ROLE "${TEST_ROLE}"`,
+                        {},
+                        { autoCommit: true },
+                    );
+                } catch (_) {
+                    /* ignore — role may not exist */
+                }
+                await conn.execute(
+                    `CREATE ROLE "${TEST_ROLE}"`,
+                    {},
+                    { autoCommit: true },
+                );
+            });
+            roleCreated = true;
+        } catch (e) {
+            // CREATE ROLE requires CREATE ROLE privilege — skip all DCL tests if missing
+            if (
+                e.message.includes("ORA-01031") ||
+                e.message.includes("ORA-01921")
+            ) {
+                roleCreated = false;
+            } else {
+                throw e;
+            }
+        }
+    });
+
+    after(async function () {
+        if (roleCreated) {
+            try {
+                await db.withConnection(async (conn) => {
+                    await conn.execute(
+                        `DROP ROLE "${TEST_ROLE}"`,
+                        {},
+                        { autoCommit: true },
+                    );
+                });
+            } catch (_) {
+                /* best-effort cleanup */
+            }
+        }
+    });
 
     it("grant SELECT on a table succeeds", async function () {
-        // Self-grant on test table — valid in Oracle
-        try {
-            const result = await dcl.grant(["SELECT"], T.USERS, GRANTEE);
-            expect(result.acknowledged).to.be.true;
-        } catch (e) {
-            // Skip on privilege or user-not-found errors
-            if (
-                e.message.includes("ORA-01749") ||
-                e.message.includes("ORA-01917") ||
-                e.message.includes("ORA-01031")
-            ) {
-                this.skip();
-                return;
-            }
-            throw e;
-        }
+        if (!roleCreated) return this.skip();
+        const result = await dcl.grant(["SELECT"], T.USERS, TEST_ROLE);
+        expect(result.acknowledged).to.be.true;
     });
 
     it("grant multiple privileges at once", async function () {
-        try {
-            const result = await dcl.grant(
-                ["SELECT", "INSERT", "UPDATE"],
-                T.ORDERS,
-                GRANTEE,
-            );
-            expect(result.acknowledged).to.be.true;
-        } catch (e) {
-            if (
-                e.message.includes("ORA-01749") ||
-                e.message.includes("ORA-01917") ||
-                e.message.includes("ORA-01031")
-            ) {
-                this.skip();
-                return;
-            }
-            throw e;
-        }
+        if (!roleCreated) return this.skip();
+        const result = await dcl.grant(
+            ["SELECT", "INSERT", "UPDATE"],
+            T.ORDERS,
+            TEST_ROLE,
+        );
+        expect(result.acknowledged).to.be.true;
     });
 
     it("revoke removes a privilege", async function () {
-        try {
-            const result = await dcl.revoke(["INSERT"], T.ORDERS, GRANTEE);
-            expect(result.acknowledged).to.be.true;
-        } catch (e) {
-            if (
-                e.message.includes("ORA-01749") ||
-                e.message.includes("ORA-01927") ||
-                e.message.includes("ORA-01917") ||
-                e.message.includes("ORA-01031")
-            ) {
-                this.skip();
-                return;
-            }
-            throw e;
-        }
+        if (!roleCreated) return this.skip();
+        // Grant first, then revoke
+        await dcl.grant(["INSERT"], T.ORDERS, TEST_ROLE);
+        const result = await dcl.revoke(["INSERT"], T.ORDERS, TEST_ROLE);
+        expect(result.acknowledged).to.be.true;
     });
 });
 

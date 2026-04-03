@@ -6,6 +6,9 @@
  */
 
 const { quoteIdentifier } = require("../utils");
+const {
+    oracleMongoWrapperMessages: MSG,
+} = require("../../../constants/messages");
 
 /**
  * Build a regular CTE from named QueryBuilder instances.
@@ -128,9 +131,7 @@ class CTEResult {
                 });
                 return result.rows || [];
             } catch (err) {
-                throw new Error(
-                    `[CTEResult.toArray] ${err.message}\nSQL: ${sql}`,
-                );
+                throw new Error(MSG.wrapError("CTEResult.toArray", err, sql));
             }
         });
     }
@@ -273,7 +274,7 @@ class RecursiveCTEResult {
                 return result.rows || [];
             } catch (err) {
                 throw new Error(
-                    `[RecursiveCTEResult.toArray] ${err.message}\nSQL: ${sql}`,
+                    MSG.wrapError("RecursiveCTEResult.toArray", err, sql),
                 );
             }
         });

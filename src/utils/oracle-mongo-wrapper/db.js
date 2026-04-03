@@ -6,6 +6,7 @@
  */
 
 const config = require("../../config");
+const { oracleMongoWrapperMessages: MSG } = require("../../constants/messages");
 
 /**
  * Creates a db interface bound to a named connection from database.js.
@@ -16,9 +17,7 @@ const config = require("../../config");
  */
 function createDb(connectionName = "userAccount") {
     if (!connectionName || typeof connectionName !== "string") {
-        throw new TypeError(
-            "createDb: connectionName must be a non-empty string",
-        );
+        throw new TypeError(MSG.CREATEDB_INVALID_CONNECTION_NAME);
     }
 
     return {
