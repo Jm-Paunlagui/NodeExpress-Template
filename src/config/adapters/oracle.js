@@ -424,7 +424,6 @@ async function withTransaction(connectionName, callback) {
     return withConnection(connectionName, async (conn) => {
         let committed = false;
         try {
-            await conn.execute("BEGIN");
             const result = await callback(conn);
             await conn.commit();
             committed = true;

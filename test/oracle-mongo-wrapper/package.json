@@ -1,0 +1,21 @@
+{
+    "name": "oracle-mongo-wrapper",
+    "version": "1.0.0",
+    "description": "Production-grade OracleDB wrapper library with MongoDB-style API",
+    "main": "index.js",
+    "scripts": {
+        "test": "mocha test.js --timeout 30000"
+    },
+    "devDependencies": {
+        "mocha": "^10.2.0",
+        "chai": "^4.3.7"
+    },
+    "keywords": [
+        "oracle",
+        "mongodb",
+        "wrapper",
+        "oracledb",
+        "query-builder"
+    ],
+    "license": "ISC"
+}

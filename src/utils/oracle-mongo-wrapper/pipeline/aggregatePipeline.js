@@ -1,0 +1,609 @@
+"use strict";
+
+/**
+ * @fileoverview Translates MongoDB-style aggregation pipeline → Oracle SQL.
+ * Uses CTE chaining: each stage becomes a CTE wrapping the previous.
+ */
+
+const { quoteIdentifier } = require("../utils");
+const { parseFilter } = require("../parsers/filterParser");
+
+let _bindCounter = 0;
+function _nextBind(prefix) {
+    return `${prefix}_${_bindCounter++}`;
+}
+function _resetCounter() {
+    _bindCounter = 0;
+}
+
+/**
+ * Build a full SQL query from a pipeline.
+ * @param {string} tableName
+ * @param {Array} pipeline
+ * @param {Object} db - db interface (for oracledb constants)
+ * @returns {{ sql: string, binds: Object }}
+ */
+function buildAggregateSQL(tableName, pipeline, db) {
+    _resetCounter();
+    const ctes = [];
+    const allBinds = {};
+    let prevSource = quoteIdentifier(tableName);
+    let stageIdx = 0;
+
+    // Pre-scan for $having — attach to preceding $group
+    for (let i = 0; i < pipeline.length; i++) {
+        if (pipeline[i].$having && i > 0 && pipeline[i - 1].$group) {
+            pipeline[i - 1]._having = pipeline[i].$having;
+            pipeline.splice(i, 1);
+            i--;
+        }
+    }
+
+    for (const stage of pipeline) {
+        const stageAlias = `stage_${stageIdx}`;
+        const key = Object.keys(stage).filter((k) => k !== "_having")[0];
+
+        switch (key) {
+            case "$match": {
+                const { whereClause, binds } = parseFilter(stage.$match);
+                Object.assign(allBinds, binds);
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT * FROM ${prevSource} ${whereClause}`,
+                });
+                break;
+            }
+
+            case "$group": {
+                const { sql, binds } = _buildGroup(
+                    stage.$group,
+                    prevSource,
+                    stage._having,
+                );
+                Object.assign(allBinds, binds);
+                ctes.push({ alias: stageAlias, sql });
+                break;
+            }
+
+            case "$sort": {
+                const orderBy = _buildSortString(stage.$sort);
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT * FROM ${prevSource} ORDER BY ${orderBy}`,
+                });
+                break;
+            }
+
+            case "$limit": {
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT * FROM ${prevSource} FETCH FIRST ${stage.$limit} ROWS ONLY`,
+                });
+                break;
+            }
+
+            case "$skip": {
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT * FROM ${prevSource} OFFSET ${stage.$skip} ROWS`,
+                });
+                break;
+            }
+
+            case "$count": {
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT COUNT(*) AS ${stage.$count.toUpperCase()} FROM ${prevSource}`,
+                });
+                break;
+            }
+
+            case "$project": {
+                const projCols = _buildProjectCols(stage.$project);
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT ${projCols} FROM ${prevSource}`,
+                });
+                break;
+            }
+
+            case "$addFields": {
+                const { sql: addCols, binds: addBinds } = _buildAddFieldsCols(
+                    stage.$addFields,
+                );
+                Object.assign(allBinds, addBinds);
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT ${prevSource}.*, ${addCols} FROM ${prevSource}`,
+                });
+                break;
+            }
+
+            case "$lookup": {
+                const { buildJoinSQL } = require("../joins/joinBuilder");
+                const joinSql = buildJoinSQL(prevSource, stage.$lookup);
+                ctes.push({ alias: stageAlias, sql: joinSql });
+                break;
+            }
+
+            case "$lateralJoin": {
+                const lj = stage.$lateralJoin;
+                const { sql: subSql, binds: subBinds } = _buildLateralSub(
+                    lj,
+                    prevSource,
+                );
+                Object.assign(allBinds, subBinds);
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT ${prevSource}.*, ${quoteIdentifier(lj.as)}.* FROM ${prevSource}, LATERAL (${subSql}) ${quoteIdentifier(lj.as)}`,
+                });
+                break;
+            }
+
+            case "$out": {
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `INSERT INTO ${quoteIdentifier(stage.$out)} SELECT * FROM ${prevSource}`,
+                });
+                break;
+            }
+
+            case "$merge": {
+                const mergeSql = _buildMergeStage(stage.$merge, prevSource);
+                ctes.push({ alias: stageAlias, sql: mergeSql, isMerge: true });
+                break;
+            }
+
+            case "$bucket": {
+                const { sql, binds } = _buildBucket(stage.$bucket, prevSource);
+                Object.assign(allBinds, binds);
+                ctes.push({ alias: stageAlias, sql });
+                break;
+            }
+
+            case "$facet": {
+                // Each facet pipeline is a separate CTE, union all at end
+                const facetCtes = [];
+                for (const [facetName, facetPipeline] of Object.entries(
+                    stage.$facet,
+                )) {
+                    const { sql } = buildAggregateSQL(
+                        prevSource.replace(/"/g, ""),
+                        facetPipeline,
+                        db,
+                    );
+                    facetCtes.push(
+                        `SELECT '${facetName}' AS facet_name, sub.* FROM (${sql}) sub`,
+                    );
+                }
+                ctes.push({
+                    alias: stageAlias,
+                    sql: facetCtes.join("\nUNION ALL\n"),
+                });
+                break;
+            }
+
+            case "$replaceRoot": {
+                // Use the expression as the new root
+                const newRoot = stage.$replaceRoot.newRoot;
+                if (typeof newRoot === "string" && newRoot.startsWith("$")) {
+                    ctes.push({
+                        alias: stageAlias,
+                        sql: `SELECT ${newRoot.substring(1)}.* FROM ${prevSource}`,
+                    });
+                } else {
+                    ctes.push({
+                        alias: stageAlias,
+                        sql: `SELECT * FROM ${prevSource}`,
+                    });
+                }
+                break;
+            }
+
+            case "$unwind": {
+                // Basic support: pass through (Oracle doesn't natively unwind arrays)
+                ctes.push({
+                    alias: stageAlias,
+                    sql: `SELECT * FROM ${prevSource}`,
+                });
+                break;
+            }
+
+            default:
+                // Unknown stage — skip
+                stageIdx++;
+                continue;
+        }
+
+        prevSource = quoteIdentifier(stageAlias);
+        stageIdx++;
+    }
+
+    // Build final SQL
+    if (ctes.length === 0) {
+        return {
+            sql: `SELECT * FROM ${quoteIdentifier(tableName)}`,
+            binds: allBinds,
+        };
+    }
+
+    if (ctes.length === 1) {
+        return { sql: ctes[0].sql, binds: allBinds };
+    }
+
+    // Build WITH ... AS chain
+    const withParts = ctes
+        .slice(0, -1)
+        .map((c) => `${quoteIdentifier(c.alias)} AS (${c.sql})`);
+    const lastCte = ctes[ctes.length - 1];
+
+    const sql = `WITH ${withParts.join(",\n     ")}\n${lastCte.sql}`;
+    return { sql, binds: allBinds };
+}
+
+/**
+ * Build GROUP BY clause with aggregate functions.
+ */
+function _buildGroup(group, source, having) {
+    const binds = {};
+    const selectParts = [];
+    const groupByParts = [];
+
+    // _id defines the GROUP BY columns
+    const idSpec = group._id;
+
+    if (idSpec === null) {
+        // No grouping — aggregate over entire table
+    } else if (typeof idSpec === "string") {
+        const col = idSpec.startsWith("$") ? idSpec.substring(1) : idSpec;
+        selectParts.push(`${quoteIdentifier(col)}`);
+        groupByParts.push(quoteIdentifier(col));
+    } else if (typeof idSpec === "object" && !Array.isArray(idSpec)) {
+        // Check for $rollup, $cube, $groupingSets
+        if (idSpec.$rollup) {
+            const cols = idSpec.$rollup.map((c) => quoteIdentifier(c));
+            selectParts.push(...idSpec.$rollup.map(quoteIdentifier));
+            groupByParts.push(`ROLLUP(${cols.join(", ")})`);
+        } else if (idSpec.$cube) {
+            const cols = idSpec.$cube.map((c) => quoteIdentifier(c));
+            selectParts.push(...idSpec.$cube.map(quoteIdentifier));
+            groupByParts.push(`CUBE(${cols.join(", ")})`);
+        } else if (idSpec.$groupingSets) {
+            const sets = idSpec.$groupingSets.map((set) => {
+                if (Array.isArray(set) && set.length === 0) return "()";
+                if (Array.isArray(set))
+                    return `(${set.map(quoteIdentifier).join(", ")})`;
+                return quoteIdentifier(set);
+            });
+            // Collect all unique columns
+            const allCols = new Set();
+            idSpec.$groupingSets.forEach((set) => {
+                if (Array.isArray(set)) set.forEach((c) => allCols.add(c));
+                else if (set) allCols.add(set);
+            });
+            selectParts.push(...[...allCols].map(quoteIdentifier));
+            groupByParts.push(`GROUPING SETS(${sets.join(", ")})`);
+        } else {
+            // Regular object — { alias: '$field', ... }
+            for (const [alias, fieldRef] of Object.entries(idSpec)) {
+                const col =
+                    typeof fieldRef === "string" && fieldRef.startsWith("$")
+                        ? fieldRef.substring(1)
+                        : alias;
+                selectParts.push(
+                    `${quoteIdentifier(col)} AS ${quoteIdentifier(alias)}`,
+                );
+                groupByParts.push(quoteIdentifier(col));
+            }
+        }
+    }
+
+    // Aggregate expressions
+    const aliasToExpr = {};
+    for (const [alias, expr] of Object.entries(group)) {
+        if (alias === "_id") continue;
+        const aggSql = _buildAggExpr(expr, binds);
+        aliasToExpr[alias] = aggSql;
+        selectParts.push(`${aggSql} AS ${alias.toUpperCase()}`);
+    }
+
+    let sql = `SELECT ${selectParts.join(", ")} FROM ${source}`;
+    if (groupByParts.length > 0) {
+        sql += ` GROUP BY ${groupByParts.join(", ")}`;
+    }
+
+    // HAVING
+    if (having) {
+        const havingParts = [];
+        for (const [col, cond] of Object.entries(having)) {
+            // Use the aggregate expression instead of the alias
+            const aggExpr =
+                aliasToExpr[col] || quoteIdentifier(col.toUpperCase());
+            if (typeof cond === "object") {
+                for (const [op, val] of Object.entries(cond)) {
+                    const bname = _nextBind("having");
+                    binds[bname] = val;
+                    const sqlOp =
+                        {
+                            $gt: ">",
+                            $gte: ">=",
+                            $lt: "<",
+                            $lte: "<=",
+                            $eq: "=",
+                            $ne: "<>",
+                        }[op] || "=";
+                    havingParts.push(`${aggExpr} ${sqlOp} :${bname}`);
+                }
+            }
+        }
+        if (havingParts.length > 0) {
+            sql += ` HAVING ${havingParts.join(" AND ")}`;
+        }
+    }
+
+    return { sql, binds };
+}
+
+/**
+ * Build an aggregate expression (e.g. { $sum: '$amount' })
+ */
+function _buildAggExpr(expr, binds) {
+    if (typeof expr === "object") {
+        for (const [op, val] of Object.entries(expr)) {
+            switch (op) {
+                case "$sum":
+                    return `SUM(${_fieldRef(val)})`;
+                case "$avg":
+                    return `AVG(${_fieldRef(val)})`;
+                case "$min":
+                    return `MIN(${_fieldRef(val)})`;
+                case "$max":
+                    return `MAX(${_fieldRef(val)})`;
+                case "$count":
+                    return `COUNT(${val === "*" ? "*" : _fieldRef(val)})`;
+                case "$first":
+                    return `MIN(${_fieldRef(val)})`;
+                case "$last":
+                    return `MAX(${_fieldRef(val)})`;
+                case "$mul": {
+                    if (Array.isArray(val)) {
+                        return val
+                            .map((v) => _fieldRefOrBind(v, binds))
+                            .join(" * ");
+                    }
+                    return _fieldRef(val);
+                }
+                case "$add": {
+                    if (Array.isArray(val)) {
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" + ")})`;
+                    }
+                    return _fieldRef(val);
+                }
+                case "$subtract": {
+                    if (Array.isArray(val)) {
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" - ")})`;
+                    }
+                    return _fieldRef(val);
+                }
+                case "$divide": {
+                    if (Array.isArray(val)) {
+                        return `(${val.map((v) => _fieldRefOrBind(v, binds)).join(" / ")})`;
+                    }
+                    return _fieldRef(val);
+                }
+                case "$concat": {
+                    if (Array.isArray(val)) {
+                        return val.map(_fieldRef).join(" || ");
+                    }
+                    return _fieldRef(val);
+                }
+                case "$toUpper":
+                    return `UPPER(${_fieldRef(val)})`;
+                case "$toLower":
+                    return `LOWER(${_fieldRef(val)})`;
+                case "$substr": {
+                    if (Array.isArray(val)) {
+                        return `SUBSTR(${_fieldRef(val[0])}, ${val[1]}, ${val[2]})`;
+                    }
+                    return _fieldRef(val);
+                }
+                case "$dateToString": {
+                    const fmt = val.format || "YYYY-MM-DD";
+                    return `TO_CHAR(${_fieldRef(val.date)}, '${fmt}')`;
+                }
+                case "$cond": {
+                    const { if: ifCond, then: thenVal, else: elseVal } = val;
+                    const condSql = _buildCondExpr(ifCond, binds);
+                    const thenSql = _fieldRefOrBind(thenVal, binds);
+                    const elseSql = _fieldRefOrBind(elseVal, binds);
+                    return `CASE WHEN ${condSql} THEN ${thenSql} ELSE ${elseSql} END`;
+                }
+                case "$ifNull": {
+                    if (Array.isArray(val)) {
+                        const parts = val.map((v) => _fieldRefOrBind(v, binds));
+                        return `COALESCE(${parts.join(", ")})`;
+                    }
+                    return _fieldRef(val);
+                }
+                case "$size":
+                    return `JSON_ARRAY_LENGTH(${_fieldRef(val)})`;
+                case "$window": {
+                    const { buildWindowExpr } = require("./windowFunctions");
+                    return buildWindowExpr(val);
+                }
+                default:
+                    return _fieldRef(val);
+            }
+        }
+    }
+    return String(expr);
+}
+
+function _fieldRef(val) {
+    if (typeof val === "string" && val.startsWith("$")) {
+        return quoteIdentifier(val.substring(1));
+    }
+    if (val === "*") return "*";
+    if (typeof val === "number") return String(val);
+    return quoteIdentifier(val);
+}
+
+function _fieldRefOrBind(val, binds) {
+    if (typeof val === "string" && val.startsWith("$")) {
+        return quoteIdentifier(val.substring(1));
+    }
+    if (typeof val === "number" || typeof val === "boolean") {
+        const bname = _nextBind("agg");
+        binds[bname] = val;
+        return `:${bname}`;
+    }
+    if (typeof val === "string") {
+        const bname = _nextBind("agg");
+        binds[bname] = val;
+        return `:${bname}`;
+    }
+    return String(val);
+}
+
+function _buildCondExpr(cond, binds) {
+    // Simple condition: { field: { $gt: value } }
+    if (typeof cond === "object") {
+        for (const [field, ops] of Object.entries(cond)) {
+            const fref = _fieldRef(field.startsWith("$") ? field : `$${field}`);
+            if (typeof ops === "object") {
+                for (const [op, val] of Object.entries(ops)) {
+                    const bname = _nextBind("cond");
+                    binds[bname] = val;
+                    const sqlOp =
+                        {
+                            $gt: ">",
+                            $gte: ">=",
+                            $lt: "<",
+                            $lte: "<=",
+                            $eq: "=",
+                            $ne: "<>",
+                        }[op] || "=";
+                    return `${fref} ${sqlOp} :${bname}`;
+                }
+            } else {
+                const bname = _nextBind("cond");
+                binds[bname] = ops;
+                return `${fref} = :${bname}`;
+            }
+        }
+    }
+    return "1=1";
+}
+
+function _buildSortString(sortSpec) {
+    return Object.entries(sortSpec)
+        .map(
+            ([col, dir]) =>
+                `${col.toUpperCase()} ${dir === -1 ? "DESC" : "ASC"}`,
+        )
+        .join(", ");
+}
+
+function _buildProjectCols(project) {
+    const parts = [];
+    for (const [col, spec] of Object.entries(project)) {
+        if (spec === 1 || spec === true) {
+            parts.push(quoteIdentifier(col));
+        } else if (typeof spec === "string" && spec.startsWith("$")) {
+            parts.push(
+                `${quoteIdentifier(spec.substring(1))} AS ${col.toUpperCase()}`,
+            );
+        } else if (typeof spec === "object") {
+            const expr = _buildAggExpr(spec, {});
+            parts.push(`${expr} AS ${col.toUpperCase()}`);
+        }
+    }
+    return parts.length > 0 ? parts.join(", ") : "*";
+}
+
+function _buildAddFieldsCols(addFields) {
+    const binds = {};
+    const parts = [];
+    for (const [alias, spec] of Object.entries(addFields)) {
+        if (typeof spec === "object") {
+            const expr = _buildAggExpr(spec, binds);
+            parts.push(`${expr} AS ${alias.toUpperCase()}`);
+        } else if (typeof spec === "string" && spec.startsWith("$")) {
+            parts.push(
+                `${quoteIdentifier(spec.substring(1))} AS ${alias.toUpperCase()}`,
+            );
+        } else {
+            parts.push(`${spec} AS ${alias.toUpperCase()}`);
+        }
+    }
+    return { sql: parts.join(", "), binds };
+}
+
+function _buildLateralSub(lj, prevSource) {
+    if (lj.subquery && typeof lj.subquery._buildSQL === "function") {
+        let { sql, binds } = lj.subquery._buildSQL();
+        // Post-process: replace bind variables whose values start with "$outer."
+        // with direct column references to the outer table (prevSource)
+        for (const [key, val] of Object.entries(binds)) {
+            if (typeof val === "string" && val.startsWith("$outer.")) {
+                const outerCol = val.slice(7);
+                sql = sql.replace(
+                    new RegExp(`:${key}\\b`, "g"),
+                    `${prevSource}.${quoteIdentifier(outerCol)}`,
+                );
+                delete binds[key];
+            }
+        }
+        return { sql, binds };
+    }
+    return { sql: "SELECT 1 FROM DUAL", binds: {} };
+}
+
+function _buildMergeStage(merge, source) {
+    const into = quoteIdentifier(merge.into);
+    const onCols = Object.entries(merge.on)
+        .map(
+            ([l, r]) => `tgt.${quoteIdentifier(l)} = src.${quoteIdentifier(r)}`,
+        )
+        .join(" AND ");
+    return `MERGE INTO ${into} tgt USING (SELECT * FROM ${source}) src ON (${onCols}) WHEN MATCHED THEN UPDATE SET tgt.updated = SYSDATE WHEN NOT MATCHED THEN INSERT VALUES (src.*)`;
+}
+
+function _buildBucket(bucket, source) {
+    const binds = {};
+    const { groupBy, boundaries, default: defaultBucket, output } = bucket;
+    const col = groupBy.startsWith("$") ? groupBy.substring(1) : groupBy;
+    const cases = [];
+
+    for (let i = 0; i < boundaries.length - 1; i++) {
+        const lo = _nextBind("bkt");
+        const hi = _nextBind("bkt");
+        binds[lo] = boundaries[i];
+        binds[hi] = boundaries[i + 1];
+        cases.push(
+            `WHEN ${quoteIdentifier(col)} >= :${lo} AND ${quoteIdentifier(col)} < :${hi} THEN ${boundaries[i]}`,
+        );
+    }
+    if (defaultBucket) {
+        cases.push(`ELSE '${defaultBucket}'`);
+    }
+
+    const bucketExpr = `CASE ${cases.join(" ")} END`;
+    const selectParts = [`${bucketExpr} AS bucket`];
+
+    if (output) {
+        for (const [alias, agg] of Object.entries(output)) {
+            const aggSql = _buildAggExpr(agg, binds);
+            selectParts.push(`${aggSql} AS ${quoteIdentifier(alias)}`);
+        }
+    } else {
+        selectParts.push("COUNT(*) AS count");
+    }
+
+    return {
+        sql: `SELECT ${selectParts.join(", ")} FROM ${source} GROUP BY ${bucketExpr}`,
+        binds,
+    };
+}
+
+module.exports = { buildAggregateSQL };
