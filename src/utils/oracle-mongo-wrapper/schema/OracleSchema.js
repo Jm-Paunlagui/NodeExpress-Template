@@ -1,7 +1,43 @@
 "use strict";
 
 /**
- * @fileoverview DDL operations: createTable, alterTable, dropTable, createView, etc.
+ * ============================================================================
+ * OracleSchema.js — DDL (Data Definition Language) Operations
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Provides a class for managing Oracle database schema objects:
+ *   tables, views, sequences, and schemas.
+ *
+ * AVAILABLE OPERATIONS:
+ *   createTable()    — CREATE TABLE with full column spec (PK, auto-increment, FK, etc.)
+ *   alterTable()     — ALTER TABLE: add/drop/modify/rename columns, add/drop constraints
+ *   dropTable()      — DROP TABLE (with optional CASCADE CONSTRAINTS PURGE)
+ *   truncateTable()  — TRUNCATE TABLE (remove all rows instantly)
+ *   renameTable()    — RENAME table
+ *   createView()     — CREATE [OR REPLACE] [FORCE] VIEW from a QueryBuilder or raw SQL
+ *   dropView()       — DROP VIEW
+ *   createSequence() — CREATE SEQUENCE (for generating unique IDs)
+ *   createSchema()   — CREATE SCHEMA AUTHORIZATION
+ *
+ * USAGE:
+ *   const schema = new OracleSchema(db);
+ *
+ *   await schema.createTable("users", {
+ *     id:    { type: "NUMBER", primaryKey: true, autoIncrement: true },
+ *     name:  { type: "VARCHAR2(100)", notNull: true },
+ *     email: { type: "VARCHAR2(200)" },
+ *     deptId: { type: "NUMBER", references: { table: "departments", column: "id" } }
+ *   });
+ *
+ *   await schema.alterTable("users", { addColumn: { phone: "VARCHAR2(20)" } });
+ *   await schema.dropTable("temp_data", { cascade: true, ifExists: true });
+ *
+ * ifNotExists / ifExists:
+ *   Oracle doesn't natively support IF NOT EXISTS / IF EXISTS for DDL.
+ *   These options wrap the DDL in PL/SQL exception handlers that catch
+ *   ORA-00955 (already exists) or ORA-00942 (does not exist).
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -9,6 +45,11 @@ const {
     oracleMongoWrapperMessages: MSG,
 } = require("../../../constants/messages");
 
+/**
+ * Oracle DDL (Data Definition Language) manager.
+ * All methods use db.withConnection() to borrow a connection from the pool.
+ * All DDL statements use autoCommit: true (DDL is auto-committed by Oracle anyway).
+ */
 class OracleSchema {
     /**
      * @param {Object} db - db interface from createDb
@@ -18,11 +59,29 @@ class OracleSchema {
     }
 
     /**
-     * Create a table with column definitions.
+     * Create a new table with column definitions.
+     *
+     * Each column can have:
+     *   type          — Oracle type: NUMBER, VARCHAR2(100), DATE, CLOB, etc.
+     *   primaryKey    — Mark as PRIMARY KEY
+     *   autoIncrement — GENERATED ALWAYS AS IDENTITY (Oracle 12c+)
+     *   notNull       — NOT NULL constraint
+     *   default       — DEFAULT value (raw SQL expression)
+     *   check         — CHECK constraint (raw SQL condition)
+     *   references    — FOREIGN KEY: { table, column }
+     *
      * @param {string} tableName
-     * @param {Object} columns - { colName: { type, primaryKey, autoIncrement, notNull, default, check, references } }
-     * @param {Object} [options] - ifNotExists
+     * @param {Object} columns - Column definitions
+     * @param {Object} [options] - { ifNotExists: true } to silently skip if table exists
      * @returns {Promise<{ acknowledged: boolean }>}
+     *
+     * @example
+     *   await schema.createTable("products", {
+     *     id:    { type: "NUMBER", primaryKey: true, autoIncrement: true },
+     *     name:  { type: "VARCHAR2(200)", notNull: true },
+     *     price: { type: "NUMBER(10,2)", check: "price > 0" },
+     *     categoryId: { type: "NUMBER", references: { table: "categories", column: "id" } }
+     *   }, { ifNotExists: true });
      */
     async createTable(tableName, columns, options = {}) {
         return this.db.withConnection(async (conn) => {
@@ -76,10 +135,23 @@ class OracleSchema {
     }
 
     /**
-     * Alter a table.
+     * Alter an existing table's structure.
+     *
+     * Supported operations (pass ONE per call):
+     *   addColumn:      { colName: "TYPE" }       — ADD column(s)
+     *   dropColumn:     "colName"                  — DROP a column
+     *   modifyColumn:   { colName: "NEW_TYPE" }    — MODIFY column type
+     *   renameColumn:   { from: "old", to: "new" } — RENAME a column
+     *   addConstraint:  { type: "UNIQUE", columns: [...], name: "..." }
+     *   dropConstraint: "constraintName"
+     *
      * @param {string} tableName
-     * @param {Object} operation - addColumn, dropColumn, modifyColumn, renameColumn, addConstraint, dropConstraint
+     * @param {Object} operation - The alteration to perform
      * @returns {Promise<{ acknowledged: boolean }>}
+     *
+     * @example
+     *   await schema.alterTable("users", { addColumn: { phone: "VARCHAR2(20)" } });
+     *   await schema.alterTable("users", { renameColumn: { from: "phone", to: "mobile" } });
      */
     async alterTable(tableName, operation) {
         return this.db.withConnection(async (conn) => {
@@ -130,10 +202,16 @@ class OracleSchema {
     }
 
     /**
-     * Drop a table.
+     * Drop (delete) a table permanently.
+     *
      * @param {string} tableName
-     * @param {Object} [options] - cascade, ifExists
+     * @param {Object} [options]
+     * @param {boolean} [options.cascade] - CASCADE CONSTRAINTS PURGE (remove FKs + purge from recycle bin)
+     * @param {boolean} [options.ifExists] - Silently skip if table doesn't exist
      * @returns {Promise<{ acknowledged: boolean }>}
+     *
+     * @example
+     *   await schema.dropTable("temp_data", { cascade: true, ifExists: true });
      */
     async dropTable(tableName, options = {}) {
         return this.db.withConnection(async (conn) => {
@@ -197,11 +275,20 @@ class OracleSchema {
     }
 
     /**
-     * Create a view.
+     * Create a view from a QueryBuilder query or raw SQL string.
+     *
      * @param {string} viewName
-     * @param {QueryBuilder|string} queryBuilderOrSQL
-     * @param {Object} [options] - orReplace, force
+     * @param {QueryBuilder|string} queryBuilderOrSQL - The SELECT to base the view on
+     * @param {Object} [options]
+     * @param {boolean} [options.orReplace] - CREATE OR REPLACE (overwrite if exists)
+     * @param {boolean} [options.force] - FORCE (create even if referenced tables don't exist yet)
      * @returns {Promise<{ acknowledged: boolean }>}
+     *
+     * @example
+     *   await schema.createView("active_users",
+     *     users.find({ status: "active" }).project({ id: 1, name: 1, email: 1 }),
+     *     { orReplace: true }
+     *   );
      */
     async createView(viewName, queryBuilderOrSQL, options = {}) {
         return this.db.withConnection(async (conn) => {
@@ -264,10 +351,20 @@ class OracleSchema {
     }
 
     /**
-     * Create a sequence.
-     * @param {string} name
-     * @param {Object} [options] - startWith, incrementBy, maxValue, cycle, cache
+     * Create an Oracle sequence for generating unique IDs.
+     *
+     * @param {string} name - Sequence name
+     * @param {Object} [options]
+     * @param {number} [options.startWith] - First value (default: 1)
+     * @param {number} [options.incrementBy] - Step size (default: 1)
+     * @param {number} [options.maxValue] - Maximum value
+     * @param {number} [options.minValue] - Minimum value
+     * @param {boolean} [options.cycle] - Restart after reaching max?
+     * @param {number} [options.cache] - Number of values to cache in memory
      * @returns {Promise<{ acknowledged: boolean }>}
+     *
+     * @example
+     *   await schema.createSequence("order_seq", { startWith: 1000, incrementBy: 1 });
      */
     async createSequence(name, options = {}) {
         return this.db.withConnection(async (conn) => {

@@ -1,8 +1,33 @@
 "use strict";
 
 /**
- * @fileoverview Oracle-specific advanced features: CONNECT BY, PIVOT, UNPIVOT,
- * FOR UPDATE, RETURNING, AS OF, LATERAL JOIN, TABLESAMPLE.
+ * ============================================================================
+ * oracleAdvanced.js — Oracle-Only Advanced Features
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Provides SQL builders for Oracle-specific features that have no MongoDB
+ *   equivalent. These are powerful Oracle constructs:
+ *
+ * CONNECT BY (Hierarchical Queries):
+ *   Traverses tree-structured data (org charts, categories, file systems).
+ *   Uses Oracle's START WITH ... CONNECT BY PRIOR syntax.
+ *   Optionally adds LEVEL, SYS_CONNECT_BY_PATH, and ORDER SIBLINGS BY.
+ *
+ * PIVOT (Rows → Columns):
+ *   Rotates row values into column headers.
+ *   Example: Turn region names ("East", "West") into separate columns
+ *   with aggregated values in each.
+ *
+ * UNPIVOT (Columns → Rows):
+ *   The reverse of PIVOT — turns column headers into row values.
+ *   Example: Turn "Q1", "Q2", "Q3", "Q4" columns into quarter/value rows.
+ *
+ * NOTE ON PIVOT IN CLAUSE:
+ *   Oracle does NOT allow bind variables inside PIVOT IN (...).
+ *   Values are sanitized with .replace(/'/g, "''") before interpolation.
+ *   This is the only intentional exception to the bind variable rule.
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -10,9 +35,28 @@ const { parseFilter } = require("../parsers/filterParser");
 
 /**
  * Build a CONNECT BY hierarchical query.
- * @param {string} tableName
- * @param {Object} spec - startWith, connectBy, orderSiblings, maxLevel, includeLevel, includePath
+ *
+ * This is Oracle's way of traversing parent-child (tree) relationships.
+ * Think: org charts, category trees, file system paths.
+ *
+ * @param {string} tableName - Table containing the hierarchical data
+ * @param {Object} spec - Hierarchical query specification
+ * @param {Object} [spec.startWith] - Filter for root nodes (MongoDB filter syntax)
+ * @param {Object} spec.connectBy - Parent-child relationship
+ *   e.g. { parentId: "$PRIOR id" } means: parent's id = child's parentId
+ * @param {Object} [spec.orderSiblings] - Sort siblings: { name: 1 } for ASC
+ * @param {number} [spec.maxLevel] - Maximum tree depth to traverse
+ * @param {boolean} [spec.includeLevel] - Add LEVEL pseudo-column (depth)
+ * @param {boolean} [spec.includePath] - Add SYS_CONNECT_BY_PATH column
  * @returns {{ sql: string, binds: Object }}
+ *
+ * @example
+ *   buildConnectBy("employees", {
+ *     startWith: { managerId: null },
+ *     connectBy: { managerId: "$PRIOR id" },
+ *     includeLevel: true,
+ *     maxLevel: 5
+ *   })
  */
 function buildConnectBy(tableName, spec) {
     const {
@@ -88,10 +132,27 @@ function buildConnectBy(tableName, spec) {
 }
 
 /**
- * Build a PIVOT query.
- * @param {string} tableName
- * @param {Object} spec - value, pivotOn, pivotValues, groupBy
+ * Build a PIVOT query (rows → columns).
+ *
+ * Takes values from one column and turns them into separate columns,
+ * with an aggregate function applied to each.
+ *
+ * @param {string} tableName - Source table
+ * @param {Object} spec - PIVOT specification
+ * @param {Object} spec.value - Aggregate to apply, e.g. { $sum: "$amount" }
+ * @param {string} spec.pivotOn - Column whose values become new column headers
+ * @param {string[]} spec.pivotValues - The specific values to pivot on
+ * @param {string} spec.groupBy - Column to group by (kept as rows)
  * @returns {{ sql: string, binds: Object }}
+ *
+ * @example
+ *   buildPivot("sales", {
+ *     value: { $sum: "$amount" },
+ *     pivotOn: "region",
+ *     pivotValues: ["East", "West", "North"],
+ *     groupBy: "year"
+ *   })
+ *   // Each year gets a row, each region becomes a column with SUM(amount)
  */
 function buildPivot(tableName, spec) {
     const { value, pivotOn, pivotValues, groupBy } = spec;
@@ -122,10 +183,26 @@ function buildPivot(tableName, spec) {
 }
 
 /**
- * Build an UNPIVOT query.
- * @param {string} tableName
- * @param {Object} spec - valueColumn, nameColumn, columns, includeNulls
+ * Build an UNPIVOT query (columns → rows).
+ *
+ * The reverse of PIVOT — takes multiple columns and turns them into
+ * rows with a name column and a value column.
+ *
+ * @param {string} tableName - Source table
+ * @param {Object} spec - UNPIVOT specification
+ * @param {string} spec.valueColumn - Name for the new value column
+ * @param {string} spec.nameColumn - Name for the new name/label column
+ * @param {string[]} spec.columns - Column names to unpivot
+ * @param {boolean} [spec.includeNulls=false] - Include rows where value is NULL
  * @returns {{ sql: string, binds: Object }}
+ *
+ * @example
+ *   buildUnpivot("quarterly_sales", {
+ *     valueColumn: "revenue",
+ *     nameColumn: "quarter",
+ *     columns: ["Q1", "Q2", "Q3", "Q4"]
+ *   })
+ *   // Each Q1/Q2/Q3/Q4 column becomes a row: { quarter: "Q1", revenue: 1000 }
  */
 function buildUnpivot(tableName, spec) {
     const { valueColumn, nameColumn, columns, includeNulls = false } = spec;

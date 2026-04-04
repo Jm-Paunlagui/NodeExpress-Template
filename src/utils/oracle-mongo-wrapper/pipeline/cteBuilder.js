@@ -1,8 +1,48 @@
 "use strict";
 
 /**
- * @fileoverview CTE builders: withCTE (regular) and withRecursiveCTE (recursive/hierarchical).
- * Exposed as standalone functions accepting a db instance.
+ * ============================================================================
+ * cteBuilder.js — CTE (Common Table Expressions) for Oracle
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Lets you compose multiple QueryBuilder queries as named CTEs (WITH ... AS)
+ *   and then query across them with joins, sorts, limits, etc.
+ *
+ * TWO KINDS OF CTEs:
+ *   1. Regular CTE — withCTE(db, { name1: qb1, name2: qb2 })
+ *      Wraps multiple named queries in WITH clauses, then lets you
+ *      SELECT from one and optionally JOIN another.
+ *
+ *   2. Recursive CTE — withRecursiveCTE(db, "name", { anchor, recursive })
+ *      For hierarchical/tree data. Starts with an anchor query, then
+ *      recursively joins the table to itself using UNION ALL.
+ *      Automatically adds a LVL (level/depth) column.
+ *
+ * USAGE:
+ *   // Regular CTE
+ *   const result = await withCTE(db, {
+ *     active: users.find({ status: "active" }).project({ id: 1, name: 1 }),
+ *     orders: ordersColl.find({ year: 2024 }).project({ userId: 1, total: 1 })
+ *   })
+ *     .from("active")
+ *     .join({ from: "orders", localField: "id", foreignField: "userId" })
+ *     .sort({ total: -1 })
+ *     .limit(10)
+ *     .toArray();
+ *
+ *   // Recursive CTE (org chart)
+ *   const tree = await withRecursiveCTE(db, "org", {
+ *     anchor: employees.find({ managerId: null }),
+ *     recursive: { collection: "employees", joinOn: { managerId: "$org.id" } }
+ *   })
+ *     .sort({ LVL: 1 })
+ *     .toArray();
+ *
+ * CLASSES:
+ *   CTEResult          — chainable result for regular CTEs
+ *   RecursiveCTEResult — chainable result for recursive CTEs
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -11,24 +51,48 @@ const {
 } = require("../../../constants/messages");
 
 /**
- * Build a regular CTE from named QueryBuilder instances.
- * Returns a chainable CTE result with .from(), .join(), .toArray().
+ * Create a regular CTE from named QueryBuilder instances.
+ * Returns a chainable CTEResult with .from(), .join(), .sort(), .limit(), .skip(), .toArray().
  *
- * @param {Object} db - db interface from createDb
- * @param {Object} cteDefs - { name: QueryBuilder, ... }
- * @returns {CTEResult}
+ * @param {Object} db - db interface from createDb()
+ * @param {Object} cteDefs - Map of CTE names to QueryBuilder instances
+ *                           e.g. { active: users.find({...}), recent: orders.find({...}) }
+ * @returns {CTEResult} Chainable CTE result
+ *
+ * @example
+ *   const rows = await withCTE(db, {
+ *     topUsers: users.find({ role: "admin" }).project({ id: 1, name: 1 }),
+ *     activity: logs.find({ year: 2024 }).project({ userId: 1, action: 1 })
+ *   })
+ *     .from("topUsers")
+ *     .join({ from: "activity", localField: "id", foreignField: "userId" })
+ *     .toArray();
  */
 function withCTE(db, cteDefs) {
     return new CTEResult(db, cteDefs);
 }
 
 /**
- * Build a recursive CTE for hierarchical data.
+ * Create a recursive CTE for hierarchical/tree-structured data.
+ * Automatically adds a LVL column tracking depth.
  *
- * @param {Object} db
- * @param {string} cteName
- * @param {Object} def - { anchor: QueryBuilder, recursive: { collection, joinOn } }
- * @returns {RecursiveCTEResult}
+ * @param {Object} db - db interface from createDb()
+ * @param {string} cteName - Name for the recursive CTE
+ * @param {Object} def - Recursive definition
+ * @param {QueryBuilder} def.anchor - The starting query (root nodes)
+ * @param {Object} def.recursive - How to recurse: { collection, joinOn }
+ * @param {string} def.recursive.collection - Table to recurse into
+ * @param {Object} def.recursive.joinOn - Join conditions using "$cteName.col" references
+ * @returns {RecursiveCTEResult} Chainable recursive CTE result
+ *
+ * @example
+ *   const tree = await withRecursiveCTE(db, "org", {
+ *     anchor: employees.find({ managerId: null }),  // root: employees with no manager
+ *     recursive: {
+ *       collection: "employees",
+ *       joinOn: { managerId: "$org.id" }  // child.managerId = parent.id
+ *     }
+ *   }).sort({ LVL: 1, name: 1 }).toArray();
  */
 function withRecursiveCTE(db, cteName, def) {
     return new RecursiveCTEResult(db, cteName, def);
@@ -36,6 +100,16 @@ function withRecursiveCTE(db, cteName, def) {
 
 /**
  * Chainable result for regular CTEs.
+ *
+ * Chain methods (return `this` for chaining):
+ *   .from(cteName)  — pick which CTE to SELECT FROM
+ *   .join({...})    — JOIN another CTE
+ *   .sort({...})    — ORDER BY
+ *   .limit(n)       — FETCH FIRST N ROWS ONLY
+ *   .skip(n)        — OFFSET N ROWS
+ *
+ * Terminal method:
+ *   .toArray()      — Execute and return rows
  */
 class CTEResult {
     constructor(db, cteDefs) {
@@ -139,6 +213,12 @@ class CTEResult {
 
 /**
  * Chainable result for recursive CTEs.
+ *
+ * Adds a LVL column automatically (depth in the tree: 1 = root, 2 = child, etc.).
+ * The recursive CTE uses UNION ALL internally to build the tree.
+ *
+ * Chain methods: .sort(), .limit(), .skip()
+ * Terminal method: .toArray()
  */
 class RecursiveCTEResult {
     constructor(db, cteName, def) {
@@ -281,6 +361,7 @@ class RecursiveCTEResult {
     }
 }
 
+/** Map a join type string to Oracle JOIN keyword */
 function _resolveJoinType(type) {
     switch ((type || "inner").toLowerCase()) {
         case "left":

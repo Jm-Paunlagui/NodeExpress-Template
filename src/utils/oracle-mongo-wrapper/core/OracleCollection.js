@@ -1,8 +1,80 @@
 "use strict";
 
 /**
- * @fileoverview Core CRUD + advanced query methods mirroring MongoDB's Collection API.
- * All methods use db.withConnection() or db.withTransaction() — never manual connection management.
+ * ============================================================================
+ * OracleCollection.js — The Heart of the Library
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   This is the MAIN CLASS of the entire library. It mirrors MongoDB's
+ *   Collection API and gives you familiar methods like find(), insertOne(),
+ *   updateMany(), deleteOne(), aggregate(), etc. — but executing against
+ *   an Oracle database under the hood.
+ *
+ * HOW TO USE:
+ *   const users = new OracleCollection("users", db);
+ *   await users.findOne({ id: 1 });                     // Read one row
+ *   await users.insertOne({ name: "Ana" });              // Insert a row
+ *   await users.updateOne({ id: 1 }, { $set: { age: 25 } }); // Update
+ *   await users.deleteOne({ id: 1 });                   // Delete
+ *
+ * CONNECTION MANAGEMENT:
+ *   You never manage connections yourself. Each method internally calls
+ *   this._execute(fn), which:
+ *     - If inside a transaction → reuses the transaction's connection
+ *     - If standalone → borrows a connection from the pool, uses it, returns it
+ *
+ * COMPLETE METHOD REFERENCE:
+ *   Reading data:
+ *     find()           → Returns a lazy QueryBuilder (chainable - see QueryBuilder.js)
+ *     findOne()        → Get one row matching a filter
+ *     findOneAndUpdate() → Find a row, update it, and return the result
+ *     findOneAndDelete() → Find a row, delete it, and return the deleted row
+ *     findOneAndReplace() → Find a row and replace all its fields
+ *     countDocuments() → Count rows matching a filter
+ *     estimatedDocumentCount() → Fast count from Oracle metadata (no full scan)
+ *     distinct()       → Get unique values of a column
+ *
+ *   Writing data:
+ *     insertOne()      → Insert one row (returns the inserted ID)
+ *     insertMany()     → Bulk insert many rows at once
+ *     updateOne()      → Update the first row matching a filter
+ *     updateMany()     → Update ALL rows matching a filter
+ *     replaceOne()     → Replace all fields (except PK) of the first match
+ *     deleteOne()      → Delete the first row matching a filter
+ *     deleteMany()     → Delete ALL rows matching a filter
+ *     bulkWrite()      → Execute multiple operations in a single transaction
+ *
+ *   Aggregation & analytics:
+ *     aggregate()      → MongoDB-style aggregation pipeline (see aggregatePipeline.js)
+ *
+ *   Indexes:
+ *     createIndex()    → Create a database index for faster queries
+ *     createIndexes()  → Create multiple indexes at once
+ *     dropIndex()      → Remove an index
+ *     dropIndexes()    → Remove all non-primary-key indexes
+ *     getIndexes()     → List all indexes on the table
+ *     reIndex()        → Rebuild all indexes
+ *
+ *   Oracle MERGE (upsert):
+ *     merge()          → Insert or update based on a match condition
+ *     mergeFrom()      → Merge from another table
+ *
+ *   Oracle-specific (advanced):
+ *     connectBy()      → Hierarchical (tree) queries
+ *     pivot()          → Rotate rows into columns
+ *     unpivot()        → Rotate columns into rows
+ *     insertFromQuery() → INSERT INTO ... SELECT ...
+ *     updateFromJoin()  → Update using values from a joined table
+ *
+ *   Set operations (static methods):
+ *     OracleCollection.union()     → Combine results from two queries
+ *     OracleCollection.intersect() → Find common rows between two queries
+ *     OracleCollection.minus()     → Find rows in first query but not second
+ *
+ *   Destructive:
+ *     drop()           → DROP TABLE (deletes the entire table!)
+ * ============================================================================
  */
 
 const { quoteIdentifier, mergeBinds, rowToDoc } = require("../utils");
@@ -15,9 +87,14 @@ const {
 
 class OracleCollection {
     /**
-     * @param {string} tableName - Oracle table name
-     * @param {Object} db - db interface from createDb
-     * @param {Object} [_conn] - Optional raw connection (for transaction/session use)
+     * Create an OracleCollection instance for a specific table.
+     *
+     * @param {string} tableName - The Oracle table name (e.g. "users", "orders")
+     * @param {Object} db - The db interface from createDb()
+     * @param {Object} [_conn] - Raw connection (internal use).
+     *   When null → standalone mode (borrows connections from pool).
+     *   When set → transaction mode (reuses this connection for all operations).
+     *   You normally don't pass this yourself — it's set by Session.collection().
      */
     constructor(tableName, db, _conn = null) {
         this.tableName = tableName;
@@ -26,8 +103,16 @@ class OracleCollection {
     }
 
     /**
-     * Internal: execute a callback with a managed connection or the session conn.
+     * Internal: execute a callback with a database connection.
+     *
+     * This is THE pattern that makes every method work in both standalone
+     * mode and inside transactions without any code duplication.
+     *
+     * - If this._conn is set (inside a transaction/session) → use it directly
+     * - If this._conn is null (standalone call) → borrow from the pool, auto-release
+     *
      * @param {Function} fn - async (conn) => result
+     * @returns {Promise<*>} Whatever fn returns
      */
     async _execute(fn) {
         if (this._conn) return fn(this._conn);
@@ -37,10 +122,26 @@ class OracleCollection {
     // ─── Query / Read ─────────────────────────────────────────────
 
     /**
-     * Returns a QueryBuilder (chainable cursor). SQL is executed on terminal call.
-     * @param {Object} filter - MongoDB-style filter
-     * @param {Object} [options] - sort, limit, skip, projection, forUpdate, sample, asOf
-     * @returns {QueryBuilder}
+     * Returns a QueryBuilder (chainable cursor). SQL is NOT executed yet.
+     *
+     * Chain methods like .sort(), .limit(), .skip(), .project() to refine
+     * the query, then call a terminal method to execute:
+     *   .toArray()  → returns all matching rows
+     *   .next()     → returns the first matching row
+     *   .count()    → returns the count of matching rows
+     *   .forEach(fn)→ streams rows with O(1) memory
+     *
+     * @param {Object} filter - MongoDB-style filter (e.g. { status: "active" })
+     * @param {Object} [options] - Optional shortcuts:
+     *   - sort, limit, skip, projection, forUpdate, sample, asOf
+     * @returns {QueryBuilder} Lazy cursor — no SQL until you call a terminal method
+     *
+     * @example
+     *   const rows = await users.find({ status: "active" })
+     *     .sort({ name: 1 })     // ORDER BY "name" ASC
+     *     .limit(10)             // FETCH FIRST 10 ROWS ONLY
+     *     .project({ name: 1 })  // SELECT "name" only
+     *     .toArray();            // ← NOW the SQL runs
      */
     find(filter = {}, options = {}) {
         const qb = new QueryBuilder(
@@ -59,10 +160,18 @@ class OracleCollection {
     }
 
     /**
-     * Find a single document matching filter.
-     * @param {Object} filter
-     * @param {Object} [options]
-     * @returns {Promise<Object|null>}
+     * Find a single document (row) matching the filter.
+     *
+     * Equivalent to: SELECT * FROM table WHERE ... FETCH FIRST 1 ROW ONLY
+     * Returns null if no match is found.
+     *
+     * @param {Object} filter - Filter to match (e.g. { id: 1 })
+     * @param {Object} [options] - Currently unused, reserved for future
+     * @returns {Promise<Object|null>} The matching row or null
+     *
+     * @example
+     *   const user = await users.findOne({ id: 42 });
+     *   if (user) console.log(user.name);
      */
     async findOne(filter, options = {}) {
         return this._execute(async (conn) => {
@@ -83,11 +192,25 @@ class OracleCollection {
     }
 
     /**
-     * Find one document, update it, and return before/after.
-     * @param {Object} filter
-     * @param {Object} update - MongoDB-style update operators
-     * @param {Object} [options] - returnDocument ('before'|'after'), upsert
-     * @returns {Promise<Object|null>}
+     * Find one document, update it, and return the before or after version.
+     *
+     * This is an atomic operation — the find and update happen as one unit.
+     * If no document matches and upsert is true, a new document is inserted.
+     *
+     * @param {Object} filter - Filter to find the document (e.g. { id: 1 })
+     * @param {Object} update - Update operators (e.g. { $set: { name: "Ana" } })
+     * @param {Object} [options]
+     *   - returnDocument: 'before' (default) or 'after' — which version to return
+     *   - upsert: true to insert if no match found
+     * @returns {Promise<Object|null>} The document (before or after update), or null
+     *
+     * @example
+     *   // Update and get the new version
+     *   const updated = await users.findOneAndUpdate(
+     *     { id: 1 },
+     *     { $set: { status: "premium" } },
+     *     { returnDocument: "after" }
+     *   );
      */
     async findOneAndUpdate(filter, update, options = {}) {
         return this._execute(async (conn) => {
@@ -173,8 +296,16 @@ class OracleCollection {
 
     /**
      * Find a document, delete it, and return the deleted document.
-     * @param {Object} filter
-     * @returns {Promise<Object|null>}
+     *
+     * Useful when you need to know WHAT was deleted. The document is
+     * found first, then deleted, and the found document is returned.
+     *
+     * @param {Object} filter - Filter to find the document (e.g. { id: 1 })
+     * @returns {Promise<Object|null>} The deleted document, or null if none found
+     *
+     * @example
+     *   const deleted = await users.findOneAndDelete({ id: 42 });
+     *   console.log(`Deleted user: ${deleted.name}`);
      */
     async findOneAndDelete(filter) {
         return this._execute(async (conn) => {
@@ -206,11 +337,24 @@ class OracleCollection {
     }
 
     /**
-     * Find a document, replace it entirely (except PK), and return before/after.
-     * @param {Object} filter
-     * @param {Object} replacement - Full replacement document
-     * @param {Object} [options] - returnDocument
-     * @returns {Promise<Object|null>}
+     * Find a document, replace all its fields (except the ID/primary key),
+     * and return the before or after version.
+     *
+     * Unlike updateOne which applies operators ($set, $inc, etc.),
+     * replaceOne REPLACES the entire document with the new one.
+     *
+     * @param {Object} filter - Filter to find the document
+     * @param {Object} replacement - The complete new document
+     *   (all fields except ID will be overwritten)
+     * @param {Object} [options] - returnDocument: 'before' (default) or 'after'
+     * @returns {Promise<Object|null>} The document before/after replacement, or null
+     *
+     * @example
+     *   await users.findOneAndReplace(
+     *     { id: 1 },
+     *     { name: "Ana Maria", email: "ana@new.com", status: "active" },
+     *     { returnDocument: "after" }
+     *   );
      */
     async findOneAndReplace(filter, replacement, options = {}) {
         return this._execute(async (conn) => {
@@ -265,9 +409,17 @@ class OracleCollection {
     }
 
     /**
-     * Count documents matching filter.
-     * @param {Object} filter
-     * @returns {Promise<number>}
+     * Count documents matching a filter.
+     *
+     * Runs SELECT COUNT(*) — scans the actual data. For a faster
+     * approximate count, use estimatedDocumentCount() instead.
+     *
+     * @param {Object} [filter] - Filter criteria (omit or {} for all rows)
+     * @returns {Promise<number>} The count of matching rows
+     *
+     * @example
+     *   const total = await users.countDocuments();               // Count all
+     *   const active = await users.countDocuments({ status: "active" }); // Filtered
      */
     async countDocuments(filter = {}) {
         return this._execute(async (conn) => {
@@ -293,8 +445,19 @@ class OracleCollection {
     }
 
     /**
-     * Fast estimated count from USER_TABLES metadata.
-     * @returns {Promise<number>}
+     * Fast estimated count from Oracle's USER_TABLES metadata.
+     *
+     * This does NOT scan the table — it reads the last-known row count
+     * from Oracle's internal statistics. This is extremely fast but may
+     * be slightly stale (until the next ANALYZE/DBMS_STATS run).
+     *
+     * Good for dashboard counters where precision isn't critical.
+     *
+     * @returns {Promise<number>} Estimated number of rows
+     *
+     * @example
+     *   const approxCount = await users.estimatedDocumentCount();
+     *   console.log(`Approximately ${approxCount} users`);
      */
     async estimatedDocumentCount() {
         return this._execute(async (conn) => {
@@ -322,10 +485,20 @@ class OracleCollection {
     }
 
     /**
-     * Get distinct values of a field.
-     * @param {string} field - Column name
-     * @param {Object} [filter] - Optional filter
-     * @returns {Promise<Array>}
+     * Get distinct (unique) values of a specific column.
+     *
+     * Optionally filter which rows to consider.
+     *
+     * @param {string} field - Column name (e.g. "status")
+     * @param {Object} [filter] - Optional filter to narrow the scope
+     * @returns {Promise<Array>} Array of unique values
+     *
+     * @example
+     *   const statuses = await users.distinct("status");
+     *   // → ["active", "inactive", "pending"]
+     *
+     *   const cities = await users.distinct("city", { country: "PH" });
+     *   // → ["Manila", "Cebu", "Davao"]
      */
     async distinct(field, filter = {}) {
         return this._execute(async (conn) => {
@@ -348,10 +521,32 @@ class OracleCollection {
     // ─── Insert Operations ───────────────────────────────────────
 
     /**
-     * Insert a single document.
-     * @param {Object} document
-     * @param {Object} [options] - returning: ['col1', 'col2']
+     * Insert a single document (row) into the table.
+     *
+     * Automatically handles:
+     *   - Building the INSERT SQL with bind variables
+     *   - RETURNING clause to get back the auto-generated ID
+     *   - Custom RETURNING columns via options.returning
+     *
+     * @param {Object} document - The data to insert (e.g. { name: "Ana", age: 25 })
+     * @param {Object} [options]
+     *   - returning: Array of column names to return from the INSERT
+     *     (e.g. ['ID', 'CREATED_AT'] to get back auto-generated values)
      * @returns {Promise<{ acknowledged: boolean, insertedId: *, returning?: Object }>}
+     *   - acknowledged: true if the operation was accepted
+     *   - insertedId: The auto-generated ID of the inserted row
+     *   - returning: Object with requested RETURNING values (if options.returning was set)
+     *
+     * @example
+     *   const result = await users.insertOne({ name: "Ana", email: "ana@test.com" });
+     *   console.log(result.insertedId); // → 42 (auto-generated ID)
+     *
+     *   // With RETURNING clause:
+     *   const result2 = await users.insertOne(
+     *     { name: "Ben" },
+     *     { returning: ["ID", "CREATED_AT"] }
+     *   );
+     *   console.log(result2.returning.CREATED_AT); // → 2024-01-15T...
      */
     async insertOne(document, options = {}) {
         return this._execute(async (conn) => {
@@ -442,8 +637,25 @@ class OracleCollection {
 
     /**
      * Insert multiple documents atomically using executeMany.
-     * @param {Array<Object>} documents
+     *
+     * All documents are inserted in a SINGLE TRANSACTION — if any one fails,
+     * none of them are inserted. Much faster than calling insertOne() in a loop
+     * because it uses Oracle's executeMany() for bulk insertion.
+     *
+     * IMPORTANT: All documents must have the same set of keys (columns).
+     * The keys from the FIRST document define the columns for all rows.
+     *
+     * @param {Array<Object>} documents - Array of documents to insert
      * @returns {Promise<{ acknowledged: boolean, insertedCount: number, insertedIds: Array }>}
+     *
+     * @example
+     *   const result = await users.insertMany([
+     *     { name: "Ana", age: 25 },
+     *     { name: "Ben", age: 30 },
+     *     { name: "Cat", age: 28 },
+     *   ]);
+     *   console.log(result.insertedCount); // → 3
+     *   console.log(result.insertedIds);   // → [1, 2, 3]
      */
     async insertMany(documents) {
         if (!Array.isArray(documents) || documents.length === 0) {
@@ -524,11 +736,27 @@ class OracleCollection {
     // ─── Update Operations ───────────────────────────────────────
 
     /**
-     * Update a single document matching filter.
-     * @param {Object} filter
-     * @param {Object} update
-     * @param {Object} [options] - upsert, returning
+     * Update the FIRST document matching the filter.
+     *
+     * Uses Oracle's ROWID subquery to ensure only ONE row is updated,
+     * even if multiple rows match the filter.
+     *
+     * Supports:
+     *   - upsert: If no match, insert a new document instead
+     *   - returning: Get back specific column values after the update
+     *
+     * @param {Object} filter - Which row to update (e.g. { id: 1 })
+     * @param {Object} update - Update operators (e.g. { $set: { name: "New" } })
+     * @param {Object} [options]
+     *   - upsert: true to insert if no match found
+     *   - returning: Array of column names to return
      * @returns {Promise<{ acknowledged, matchedCount, modifiedCount, returning? }>}
+     *
+     * @example
+     *   await users.updateOne(
+     *     { id: 1 },
+     *     { $set: { status: "premium" }, $inc: { loginCount: 1 } }
+     *   );
      */
     async updateOne(filter, update, options = {}) {
         return this._execute(async (conn) => {
@@ -613,11 +841,23 @@ class OracleCollection {
     }
 
     /**
-     * Update all documents matching filter.
-     * @param {Object} filter
-     * @param {Object} update
-     * @param {Object} [options] - returning
+     * Update ALL documents matching the filter.
+     *
+     * Unlike updateOne which updates only the first match,
+     * updateMany updates EVERY row that matches the filter.
+     *
+     * @param {Object} filter - Which rows to update (e.g. { status: "trial" })
+     * @param {Object} update - Update operators (e.g. { $set: { status: "expired" } })
+     * @param {Object} [options] - returning (array of column names)
      * @returns {Promise<{ acknowledged, matchedCount, modifiedCount }>}
+     *
+     * @example
+     *   // Mark all trial accounts as expired
+     *   const result = await users.updateMany(
+     *     { status: "trial" },
+     *     { $set: { status: "expired" }, $currentDate: { updatedAt: true } }
+     *   );
+     *   console.log(`Updated ${result.modifiedCount} users`);
      */
     async updateMany(filter, update, options = {}) {
         return this._execute(async (conn) => {
@@ -650,10 +890,21 @@ class OracleCollection {
 
     /**
      * Replace a single document entirely (except primary key).
-     * @param {Object} filter
-     * @param {Object} replacement
-     * @param {Object} [options]
+     *
+     * Unlike updateOne which uses operators ($set, $inc), replaceOne
+     * REPLACES all columns with the values from the replacement object.
+     * The ID column is preserved automatically.
+     *
+     * @param {Object} filter - Which row to replace (e.g. { id: 1 })
+     * @param {Object} replacement - Complete new document (ID column is excluded)
+     * @param {Object} [options] - Reserved for future use
      * @returns {Promise<{ acknowledged, matchedCount, modifiedCount }>}
+     *
+     * @example
+     *   await users.replaceOne(
+     *     { id: 1 },
+     *     { name: "New Name", email: "new@test.com", status: "active" }
+     *   );
      */
     async replaceOne(filter, replacement, options = {}) {
         return this._execute(async (conn) => {
@@ -694,8 +945,19 @@ class OracleCollection {
 
     /**
      * Execute multiple operations atomically in a single transaction.
-     * @param {Array} operations
+     *
+     * All operations run in ONE transaction — if any fails, ALL are rolled back.
+     * Supports: insertOne, updateOne, updateMany, deleteOne, deleteMany, replaceOne.
+     *
+     * @param {Array} operations - Array of operation objects
      * @returns {Promise<{ acknowledged, results }>}
+     *
+     * @example
+     *   await users.bulkWrite([
+     *     { insertOne: { document: { name: "Ana", age: 25 } } },
+     *     { updateOne: { filter: { id: 2 }, update: { $set: { age: 31 } } } },
+     *     { deleteOne: { filter: { id: 99 } } },
+     *   ]);
      */
     async bulkWrite(operations) {
         if (!Array.isArray(operations) || operations.length === 0) {
@@ -762,10 +1024,26 @@ class OracleCollection {
     // ─── Delete Operations ───────────────────────────────────────
 
     /**
-     * Delete first matching document.
-     * @param {Object} filter
-     * @param {Object} [options] - returning
+     * Delete the FIRST document matching the filter.
+     *
+     * Uses ROWID subquery to ensure only ONE row is deleted,
+     * even if multiple rows match.
+     *
+     * @param {Object} filter - Which row to delete (e.g. { id: 1 })
+     * @param {Object} [options]
+     *   - returning: Array of column names to return from the deleted row
      * @returns {Promise<{ acknowledged, deletedCount, returning? }>}
+     *
+     * @example
+     *   const result = await users.deleteOne({ id: 42 });
+     *   console.log(result.deletedCount); // → 1
+     *
+     *   // With RETURNING to get the deleted data:
+     *   const result2 = await users.deleteOne(
+     *     { id: 42 },
+     *     { returning: ["name", "email"] }
+     *   );
+     *   console.log(result2.returning.name); // → "Ana"
      */
     async deleteOne(filter, options = {}) {
         return this._execute(async (conn) => {
@@ -820,9 +1098,18 @@ class OracleCollection {
     }
 
     /**
-     * Delete all documents matching filter.
-     * @param {Object} filter
+     * Delete ALL documents matching the filter.
+     *
+     * BE CAREFUL: This deletes EVERY row that matches.
+     * Use an empty filter {} to delete all rows (like TRUNCATE).
+     *
+     * @param {Object} filter - Which rows to delete
      * @returns {Promise<{ acknowledged, deletedCount }>}
+     *
+     * @example
+     *   // Delete all inactive users
+     *   const result = await users.deleteMany({ status: "inactive" });
+     *   console.log(`Deleted ${result.deletedCount} users`);
      */
     async deleteMany(filter) {
         return this._execute(async (conn) => {
@@ -850,7 +1137,11 @@ class OracleCollection {
     }
 
     /**
-     * Drop this table.
+     * Drop this table entirely. WARNING: This is irreversible!
+     *
+     * Runs: DROP TABLE "tableName" CASCADE CONSTRAINTS
+     * This removes the table AND all foreign key constraints pointing to it.
+     *
      * @returns {Promise<{ acknowledged }>}
      */
     async drop() {
@@ -871,10 +1162,28 @@ class OracleCollection {
 
     /**
      * Execute a MongoDB-style aggregation pipeline.
-     * Returns a thenable Promise augmented with _buildSQL() for lazy consumers
-     * like createMaterializedView.
-     * @param {Array} pipeline - Array of pipeline stage objects
+     *
+     * The pipeline is an array of stages that transform data step by step.
+     * Each stage becomes an Oracle CTE (WITH ... AS). See aggregatePipeline.js.
+     *
+     * Supported stages: $match, $group, $sort, $limit, $skip, $count,
+     * $project, $addFields, $lookup, $lateralJoin, $out, $merge,
+     * $bucket, $facet, $replaceRoot, $unwind, $having
+     *
+     * The returned object is a Promise (so you can await it) AND has a
+     * _buildSQL() method (so createMaterializedView can extract the SQL).
+     *
+     * @param {Array} pipeline - Array of stage objects
      * @returns {Promise<Array> & { _buildSQL: Function }}
+     *
+     * @example
+     *   const report = await orders.aggregate([
+     *     { $match: { status: "completed" } },
+     *     { $group: { _id: "$region", total: { $sum: "$amount" } } },
+     *     { $sort: { total: -1 } },
+     *     { $limit: 5 },
+     *   ]);
+     *   // Returns the top 5 regions by total order amount
      */
     aggregate(pipeline) {
         const { buildAggregateSQL } = require("../pipeline/aggregatePipeline");
@@ -1073,11 +1382,30 @@ class OracleCollection {
     // ─── MERGE / UPSERT ─────────────────────────────────────────
 
     /**
-     * Oracle MERGE statement.
-     * @param {Object} sourceData - Data to merge
-     * @param {Object} matchCondition - { localField, foreignField }
-     * @param {Object} options - whenMatched, whenNotMatched, whenMatchedDelete
+     * Oracle MERGE (upsert) statement using DUAL as the source.
+     *
+     * MERGE is Oracle's way of saying "insert if new, update if exists".
+     * This uses a single sourceData object matched against the table.
+     *
+     * @param {Object} sourceData - Data to merge (e.g. { id: 1, name: "Ana" })
+     * @param {Object} matchCondition - How to match rows:
+     *   - localField:   Column in the target table (e.g. "id")
+     *   - foreignField: Column in the source data (e.g. "id")
+     * @param {Object} [options]
+     *   - whenMatched: Update operators if row exists (e.g. { $set: { name: "New" } })
+     *   - whenNotMatched: "insert" to insert if no match
+     *   - whenMatchedDelete: Filter to conditionally delete matched rows
      * @returns {Promise<{ acknowledged }>}
+     *
+     * @example
+     *   await users.merge(
+     *     { id: 1, name: "Ana", status: "active" },
+     *     { localField: "id", foreignField: "id" },
+     *     {
+     *       whenMatched: { $set: { name: "Ana", status: "active" } },
+     *       whenNotMatched: "insert"
+     *     }
+     *   );
      */
     async merge(sourceData, matchCondition, options = {}) {
         return this._execute(async (conn) => {
@@ -1136,11 +1464,22 @@ class OracleCollection {
     }
 
     /**
-     * Merge from another table.
-     * @param {string} sourceTable
+     * Merge rows from another TABLE (not a single object like merge()).
+     *
+     * This is for syncing two tables: "update target from source where they match".
+     * Use $src.colName in $set values to reference source table columns.
+     *
+     * @param {string} sourceTable - Name of the source table
      * @param {Object} matchCondition - { localField, foreignField }
-     * @param {Object} options - whenMatched, whenNotMatched
+     * @param {Object} [options]
+     *   - whenMatched: { $set: { col: "$src.sourceCol" } }
      * @returns {Promise<{ acknowledged }>}
+     *
+     * @example
+     *   await target.mergeFrom("source_table",
+     *     { localField: "id", foreignField: "id" },
+     *     { whenMatched: { $set: { price: "$src.price", stock: "$src.stock" } } }
+     *   );
      */
     async mergeFrom(sourceTable, matchCondition, options = {}) {
         return this._execute(async (conn) => {
@@ -1187,9 +1526,27 @@ class OracleCollection {
     // ─── Oracle Advanced Features ────────────────────────────────
 
     /**
-     * Hierarchical query using CONNECT BY.
-     * @param {Object} spec - startWith, connectBy, orderSiblings, maxLevel, includeLevel, includePath
-     * @returns {Promise<Array>}
+     * Hierarchical (tree) query using Oracle's CONNECT BY clause.
+     *
+     * This is for querying tree structures like org charts, category trees,
+     * bill-of-materials, etc. Oracle-specific — no MongoDB equivalent.
+     *
+     * @param {Object} spec
+     *   - startWith: Filter for root nodes (e.g. { manager_id: null })
+     *   - connectBy: How children link to parents (e.g. { prior: "id", to: "manager_id" })
+     *   - orderSiblings: Sort within each level (e.g. { name: 1 })
+     *   - maxLevel: Maximum depth to traverse
+     *   - includeLevel: true to add a LEVEL pseudo-column
+     *   - includePath: true to add a SYS_CONNECT_BY_PATH column
+     * @returns {Promise<Array>} Flattened tree rows with optional LEVEL/PATH
+     *
+     * @example
+     *   const tree = await employees.connectBy({
+     *     startWith: { manager_id: null },
+     *     connectBy: { prior: "id", to: "manager_id" },
+     *     includeLevel: true,
+     *     maxLevel: 5,
+     *   });
      */
     async connectBy(spec) {
         const { buildConnectBy } = require("../advanced/oracleAdvanced");
@@ -1216,9 +1573,17 @@ class OracleCollection {
     }
 
     /**
-     * PIVOT query.
-     * @param {Object} spec - value, pivotOn, pivotValues, groupBy
-     * @returns {Promise<Array>}
+     * PIVOT query — rotate rows into columns.
+     *
+     * Example: Turn rows like { product: "A", month: "Jan", sales: 100 }
+     * into columns like { product: "A", JAN: 100, FEB: 200, MAR: 150 }
+     *
+     * @param {Object} spec
+     *   - value: Aggregate expression (e.g. { $sum: "$sales" })
+     *   - pivotOn: Column whose values become columns (e.g. "month")
+     *   - pivotValues: Array of values to pivot (e.g. ["Jan", "Feb", "Mar"])
+     *   - groupBy: Column(s) to keep as rows (e.g. ["product"])
+     * @returns {Promise<Array>} Pivoted rows
      */
     async pivot(spec) {
         const { buildPivot } = require("../advanced/oracleAdvanced");
@@ -1240,9 +1605,17 @@ class OracleCollection {
     }
 
     /**
-     * UNPIVOT query.
-     * @param {Object} spec - valueColumn, nameColumn, columns, includeNulls
-     * @returns {Promise<Array>}
+     * UNPIVOT query — rotate columns into rows (opposite of pivot).
+     *
+     * Example: Turn columns like { JAN: 100, FEB: 200 } into rows:
+     *   { month: "JAN", sales: 100 }, { month: "FEB", sales: 200 }
+     *
+     * @param {Object} spec
+     *   - valueColumn: Name for the value column in output (e.g. "sales")
+     *   - nameColumn: Name for the name column in output (e.g. "month")
+     *   - columns: Array of columns to unpivot (e.g. ["JAN", "FEB", "MAR"])
+     *   - includeNulls: true to include NULL values (uses INCLUDE NULLS)
+     * @returns {Promise<Array>} Unpivoted rows
      */
     async unpivot(spec) {
         const { buildUnpivot } = require("../advanced/oracleAdvanced");
@@ -1266,11 +1639,21 @@ class OracleCollection {
     // ─── Set Operations (static) ─────────────────────────────────
 
     /**
-     * UNION / UNION ALL of two QueryBuilder results.
-     * @param {QueryBuilder} qb1
-     * @param {QueryBuilder} qb2
+     * UNION or UNION ALL of two QueryBuilder results.
+     *
+     * UNION removes duplicates, UNION ALL keeps them (faster).
+     *
+     * @param {QueryBuilder} qb1 - First query
+     * @param {QueryBuilder} qb2 - Second query
      * @param {Object} [options] - { all: true } for UNION ALL
-     * @returns {SetResultBuilder}
+     * @returns {SetResultBuilder} Chainable builder (call .toArray() to execute)
+     *
+     * @example
+     *   const result = await OracleCollection.union(
+     *     users.find({ role: "admin" }),
+     *     users.find({ role: "superadmin" }),
+     *     { all: true }
+     *   ).toArray();
      */
     static union(qb1, qb2, options = {}) {
         const { SetResultBuilder } = require("../joins/setOperations");
@@ -1282,9 +1665,10 @@ class OracleCollection {
     }
 
     /**
-     * INTERSECT of two QueryBuilder results.
-     * @param {QueryBuilder} qb1
-     * @param {QueryBuilder} qb2
+     * INTERSECT of two queries — returns rows that appear in BOTH results.
+     *
+     * @param {QueryBuilder} qb1 - First query
+     * @param {QueryBuilder} qb2 - Second query
      * @returns {SetResultBuilder}
      */
     static intersect(qb1, qb2) {
@@ -1293,9 +1677,10 @@ class OracleCollection {
     }
 
     /**
-     * MINUS of two QueryBuilder results.
-     * @param {QueryBuilder} qb1
-     * @param {QueryBuilder} qb2
+     * MINUS of two queries — returns rows in the first query that are NOT in the second.
+     *
+     * @param {QueryBuilder} qb1 - First query (base)
+     * @param {QueryBuilder} qb2 - Second query (to subtract)
      * @returns {SetResultBuilder}
      */
     static minus(qb1, qb2) {
@@ -1306,11 +1691,23 @@ class OracleCollection {
     // ─── INSERT INTO ... SELECT ──────────────────────────────────
 
     /**
-     * Insert rows from a query into a target table.
-     * @param {string} targetTable
-     * @param {QueryBuilder} queryBuilder
-     * @param {Object} [options] - columns
+     * Insert rows from a QueryBuilder's SELECT into another table.
+     *
+     * Generates: INSERT INTO target (cols) SELECT cols FROM source WHERE ...
+     * Automatically excludes identity/auto-generated columns.
+     *
+     * @param {string} targetTable - Table to insert into
+     * @param {QueryBuilder} queryBuilder - The SELECT query providing data
+     * @param {Object} [options]
+     *   - columns: Explicit list of columns to insert
      * @returns {Promise<{ acknowledged, insertedCount }>}
+     *
+     * @example
+     *   // Copy active users to an archive table
+     *   await users.insertFromQuery(
+     *     "users_archive",
+     *     users.find({ status: "active" })
+     *   );
      */
     async insertFromQuery(targetTable, queryBuilder, options = {}) {
         return this._execute(async (conn) => {
@@ -1372,9 +1769,25 @@ class OracleCollection {
 
     /**
      * Update a table using values from a joined table.
-     * Falls back to correlated UPDATE subquery if inline view fails.
-     * @param {Object} spec - target, join, set, where
+     *
+     * This is Oracle's way of doing "UPDATE ... FROM ... JOIN ...".
+     * First tries an inline view approach; if Oracle rejects it
+     * (non-key-preserved), falls back to a correlated subquery.
+     *
+     * @param {Object} spec
+     *   - target: Target table name
+     *   - join: { table, on: { localField, foreignField }, type? }
+     *   - set: { targetCol: "$joined.sourceCol" } or literal values
+     *   - where: Optional filter on the joined result
      * @returns {Promise<{ acknowledged, modifiedCount }>}
+     *
+     * @example
+     *   await orders.updateFromJoin({
+     *     target: "orders",
+     *     join: { table: "products", on: { localField: "product_id", foreignField: "id" } },
+     *     set: { price: "$joined.price" },
+     *     where: { status: "pending" }
+     *   });
      */
     async updateFromJoin(spec) {
         return this._execute(async (conn) => {

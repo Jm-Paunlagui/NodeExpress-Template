@@ -1,8 +1,46 @@
 "use strict";
 
 /**
- * @fileoverview Translates MongoDB-style update operators into Oracle SQL SET clauses
- * with parameterized bind variables (prefixed with `upd_`).
+ * ============================================================================
+ * updateParser.js — MongoDB Update Operators → Oracle SET Clause Translator
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Takes MongoDB-style update operators and converts them into an Oracle SQL
+ *   SET clause with bind variables.
+ *
+ * THE BIG PICTURE:
+ *   When you write:   { $set: { name: "Ana" }, $inc: { loginCount: 1 } }
+ *   This file produces:
+ *     SET clause: 'SET "name" = :upd_name_0, "loginCount" = "loginCount" + :upd_loginCount_1'
+ *     Bind values: { upd_name_0: "Ana", upd_loginCount_1: 1 }
+ *
+ * SUPPORTED UPDATE OPERATORS:
+ *   ┌──────────────┬──────────────────────────────────────────────────────────┐
+ *   │ Operator     │ What it does                                            │
+ *   ├──────────────┼──────────────────────────────────────────────────────────┤
+ *   │ $set         │ Set a field to a specific value                         │
+ *   │              │ { $set: { name: "Ana" } } → "name" = :val               │
+ *   │ $unset       │ Set a field to NULL (remove its value)                  │
+ *   │              │ { $unset: { temp: 1 } } → "temp" = NULL                 │
+ *   │ $inc         │ Increment a number field                                │
+ *   │              │ { $inc: { count: 1 } } → "count" = "count" + :val       │
+ *   │ $mul         │ Multiply a number field                                 │
+ *   │              │ { $mul: { price: 1.1 } } → "price" = "price" * :val     │
+ *   │ $min         │ Set to the LESSER of current value and given value      │
+ *   │              │ { $min: { score: 50 } } → "score" = LEAST("score", :val)│
+ *   │ $max         │ Set to the GREATER of current value and given value     │
+ *   │              │ { $max: { score: 100 } } → GREATEST("score", :val)      │
+ *   │ $currentDate │ Set a field to the current date/time (SYSDATE)          │
+ *   │              │ { $currentDate: { updatedAt: true } } → SYSDATE         │
+ *   │ $rename      │ NOT SUPPORTED by Oracle — throws an error               │
+ *   └──────────────┴──────────────────────────────────────────────────────────┘
+ *
+ * BIND VARIABLE NAMING:
+ *   All bind variables from this parser are prefixed with "upd_" to avoid
+ *   collisions with bind variables from the filter parser (prefixed "where_").
+ *   Example: upd_name_0, upd_loginCount_1
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -10,9 +48,21 @@ const {
     oracleMongoWrapperMessages: MSG,
 } = require("../../../constants/messages");
 
+// ─── _createCounter ─────────────────────────────────────────────
 /**
- * Create a per-call counter for unique bind variable names.
- * @returns {{ next: (prefix: string) => string }}
+ * Creates a fresh counter for generating unique update bind variable names.
+ *
+ * Same concept as _createCounter in filterParser.js — each parseUpdate() call
+ * gets its own counter so concurrent calls don't collide on bind names.
+ *
+ * All names are prefixed with "upd_" to distinguish from WHERE binds.
+ *
+ * @returns {{ next: (prefix: string) => string }} Counter with a next() method
+ *
+ * @example
+ *   const counter = _createCounter();
+ *   counter.next("name")    // → "upd_name_0"
+ *   counter.next("status")  // → "upd_status_1"
  */
 function _createCounter() {
     let c = 0;
@@ -24,16 +74,38 @@ function _createCounter() {
 }
 
 /**
- * Reset update bind counter (no-op — retained for backward compatibility).
+ * Reset update bind counter — no-op.
+ * Kept for backward compatibility (counters are now per-call).
  */
 function resetUpdateCounter() {}
 
+// ─── parseUpdate (MAIN ENTRY POINT) ─────────────────────────────
 /**
- * Parse a MongoDB-style update object into an Oracle SET clause with bind variables.
+ * Converts a MongoDB-style update object into an Oracle SET clause.
  *
- * @param {Object} update - e.g. { $set: { name: 'Ana' }, $inc: { count: 1 } }
+ * This is the main function you call from outside this file.
+ * It iterates each update operator ($set, $inc, etc.) and builds
+ * the corresponding SQL SET fragments.
+ *
+ * @param {Object} update - MongoDB-style update object with $ operators
  * @returns {{ setClause: string, binds: Object }}
- * @throws {Error} If update object is empty or contains $rename
+ *   - setClause: SQL SET clause (e.g. 'SET "name" = :upd_name_0')
+ *   - binds: Object mapping bind names to values (e.g. { upd_name_0: "Ana" })
+ *
+ * @throws {Error} If:
+ *   - The update object is empty or not an object
+ *   - It contains $rename (not supported by Oracle)
+ *   - It contains an unrecognized operator
+ *
+ * @example
+ *   parseUpdate({ $set: { name: "Ana" }, $inc: { loginCount: 1 } })
+ *   // → {
+ *   //     setClause: 'SET "name" = :upd_name_0, "loginCount" = "loginCount" + :upd_loginCount_1',
+ *   //     binds: { upd_name_0: "Ana", upd_loginCount_1: 1 }
+ *   //   }
+ *
+ *   parseUpdate({ $currentDate: { updatedAt: true } })
+ *   // → { setClause: 'SET "updatedAt" = SYSDATE', binds: {} }
  */
 function parseUpdate(update) {
     if (

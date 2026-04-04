@@ -1,7 +1,37 @@
 "use strict";
 
 /**
- * @fileoverview UNION, UNION ALL, INTERSECT, MINUS set operations for QueryBuilder results.
+ * ============================================================================
+ * setOperations.js — UNION / INTERSECT / MINUS Set Operations
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Combines the results of two QueryBuilder queries using SQL set operators:
+ *     UNION      — combine results, remove duplicates
+ *     UNION ALL  — combine results, keep duplicates
+ *     INTERSECT  — only rows that appear in BOTH queries
+ *     MINUS      — rows in the first query but NOT in the second
+ *
+ * HOW IT WORKS:
+ *   SetResultBuilder wraps two QueryBuilder instances with a set operator.
+ *   It supports chaining (.sort(), .limit(), .skip()) and execution (.toArray()).
+ *   It automatically re-keys bind variables from the second query to prevent
+ *   naming collisions.
+ *
+ * USAGE:
+ *   const result = await OracleCollection.union(
+ *     users.find({ dept: "A" }).project({ name: 1 }),
+ *     users.find({ dept: "B" }).project({ name: 1 })
+ *   ).sort({ name: 1 }).toArray();
+ *
+ * IMPORTANT:
+ *   Both queries MUST have the same number of columns (Oracle requirement).
+ *   The constructor validates this when projections are set.
+ *
+ * THENABLE:
+ *   SetResultBuilder has a .then() method, so you can await it directly:
+ *     const rows = await OracleCollection.union(qb1, qb2);
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -10,8 +40,13 @@ const {
 } = require("../../../constants/messages");
 
 /**
- * Wraps two QueryBuilder instances with a set operator.
- * Supports chaining: .sort(), .limit(), .skip(), .toArray().
+ * Wraps two QueryBuilder instances with a SQL set operator.
+ * Supports chaining: .sort(), .limit(), .skip()
+ * Terminal methods: .toArray(), .then() (thenable)
+ *
+ * BIND VARIABLE SAFETY:
+ *   The second query's bind variables are re-keyed with a "set2_" prefix
+ *   to prevent collisions with the first query's binds.
  */
 class SetResultBuilder {
     /**

@@ -1,16 +1,52 @@
 "use strict";
 
 /**
- * @fileoverview Translates $lookup stage → Oracle SQL JOIN clauses.
+ * ============================================================================
+ * joinBuilder.js — $lookup Stage → Oracle JOIN SQL
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Translates the $lookup pipeline stage into Oracle JOIN SQL.
+ *   $lookup is MongoDB's way of doing JOINs between collections.
+ *
+ * SUPPORTED JOIN TYPES:
+ *   left    → LEFT OUTER JOIN  (default — keep all left rows)
+ *   right   → RIGHT OUTER JOIN
+ *   full    → FULL OUTER JOIN
+ *   inner   → INNER JOIN       (only matching rows)
+ *   cross   → CROSS JOIN       (cartesian product)
+ *   self    → INNER JOIN t1 JOIN t1 t2  (join table to itself)
+ *   natural → NATURAL JOIN     (join on same-named columns)
+ *
+ * MULTI-CONDITION JOINS:
+ *   Pass `on: [{ localField, foreignField }, ...]` for multiple join conditions.
+ *
+ * EXAMPLE:
+ *   buildJoinSQL('"users"', {
+ *     from: "orders",
+ *     localField: "id",
+ *     foreignField: "userId",
+ *     as: "o",
+ *     joinType: "left"
+ *   })
+ *   → 'SELECT "users".*, "o".* FROM "users" LEFT OUTER JOIN "orders" "o" ON "users"."id" = "o"."userId"'
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
 
 /**
- * Build a JOIN SQL fragment from a $lookup spec.
- * @param {string} source - Current source table/alias (already quoted)
- * @param {Object} lookup - $lookup stage spec
- * @returns {string} Full SELECT with JOIN
+ * Build a JOIN SQL fragment from a $lookup specification.
+ *
+ * @param {string} source - Current source table/CTE alias (already quoted)
+ * @param {Object} lookup - The $lookup stage specification
+ * @param {string} lookup.from - Table to join with
+ * @param {string} lookup.localField - Column on the source (left) side
+ * @param {string} lookup.foreignField - Column on the joined (right) side
+ * @param {string} [lookup.as] - Alias for the joined table (defaults to `from`)
+ * @param {string} [lookup.joinType='left'] - Join type: left, right, inner, full, cross, self, natural
+ * @param {Array} [lookup.on] - Multi-condition join: [{ localField, foreignField }, ...]
+ * @returns {string} Complete SELECT ... JOIN ... ON ... SQL
  */
 function buildJoinSQL(source, lookup) {
     const {
@@ -47,6 +83,7 @@ function buildJoinSQL(source, lookup) {
     return `SELECT ${source}.*, ${quoteIdentifier(joinAlias)}.* FROM ${source} ${jt} ${quoteIdentifier(from)} ${quoteIdentifier(joinAlias)} ON ${onClause}`;
 }
 
+/** Map a join type string to Oracle JOIN keyword */
 function _resolveJoinType(type) {
     switch ((type || "left").toLowerCase()) {
         case "left":

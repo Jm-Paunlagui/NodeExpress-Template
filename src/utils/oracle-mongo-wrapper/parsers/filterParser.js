@@ -1,8 +1,59 @@
 "use strict";
 
 /**
- * @fileoverview Translates MongoDB-style filter objects into Oracle SQL WHERE clauses
- * with parameterized bind variables.
+ * ============================================================================
+ * filterParser.js — MongoDB Filter → Oracle WHERE Clause Translator
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Takes a MongoDB-style filter object and converts it into an Oracle SQL
+ *   WHERE clause with safe bind variables.
+ *
+ * THE BIG PICTURE:
+ *   When you write:   { status: "active", age: { $gte: 18 } }
+ *   This file produces:
+ *     WHERE clause: 'WHERE "status" = :where_status_0 AND "age" >= :where_age_1'
+ *     Bind values:  { where_status_0: "active", where_age_1: 18 }
+ *
+ * WHY BIND VARIABLES?
+ *   If we put values directly into the SQL string (WHERE name = 'Juan'),
+ *   a malicious user could inject SQL code. Bind variables prevent this
+ *   by keeping values SEPARATE from the SQL string. Oracle substitutes
+ *   them safely at execution time.
+ *
+ * SUPPORTED OPERATORS:
+ *   ┌─────────────┬──────────────────────────────────────────────────┐
+ *   │ Operator    │ What it does                                     │
+ *   ├─────────────┼──────────────────────────────────────────────────┤
+ *   │ { field: v }│ Equality — WHERE "field" = :val                  │
+ *   │ $eq         │ Same as equality                                 │
+ *   │ $ne         │ Not equal — WHERE "field" <> :val                │
+ *   │ $gt / $gte  │ Greater than / greater-or-equal                  │
+ *   │ $lt / $lte  │ Less than / less-or-equal                        │
+ *   │ $in         │ Is one of — WHERE "field" IN (:v1, :v2)          │
+ *   │ $nin        │ Is NOT one of — WHERE "field" NOT IN (...)       │
+ *   │ $between    │ Range — WHERE "field" BETWEEN :min AND :max      │
+ *   │ $notBetween │ NOT BETWEEN                                      │
+ *   │ $exists     │ IS NOT NULL / IS NULL                            │
+ *   │ $regex      │ Pattern match — REGEXP_LIKE("field", :pattern)   │
+ *   │ $like       │ SQL LIKE — WHERE "field" LIKE :pattern           │
+ *   │ $case       │ CASE WHEN ... THEN ... END                       │
+ *   │ $coalesce   │ COALESCE(col1, col2, ...)                        │
+ *   │ $nullif     │ NULLIF(col, value)                               │
+ *   │ $subquery   │ Correlated subquery comparison                   │
+ *   │ $inSelect   │ WHERE "field" IN (SELECT ...)                    │
+ *   │ $gtAny, etc │ WHERE "field" > ANY/ALL (SELECT ...)             │
+ *   │ $and / $or  │ Logical AND / OR                                 │
+ *   │ $nor / $not │ NOR / NOT                                        │
+ *   │ $exists     │ EXISTS (SELECT 1 FROM ...)  (top-level)          │
+ *   │ $notExists  │ NOT EXISTS (SELECT 1 FROM ...) (top-level)       │
+ *   └─────────────┴──────────────────────────────────────────────────┘
+ *
+ * CONCURRENCY SAFETY:
+ *   Each call to parseFilter() creates its OWN counter via _createCounter().
+ *   This means two simultaneous queries will never accidentally use the
+ *   same bind variable name — even under high traffic.
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -10,9 +61,26 @@ const {
     oracleMongoWrapperMessages: MSG,
 } = require("../../../constants/messages");
 
+// ─── _createCounter ─────────────────────────────────────────────
 /**
- * Per-call bind counter to avoid global mutable state (thread-safe under concurrency).
- * @returns {{ next: (prefix: string) => string }}
+ * Creates a fresh, isolated counter for generating unique bind variable names.
+ *
+ * WHY PER-CALL?
+ *   If we used a global counter, two concurrent parseFilter() calls could
+ *   generate bind names like :where_name_5 in both queries — collision!
+ *   A per-call counter ensures each invocation starts from 0 independently.
+ *
+ * HOW IT WORKS:
+ *   The counter is a closure. Each call to next("where_name") returns:
+ *   "where_name_0", "where_name_1", "where_name_2", etc.
+ *
+ * @returns {{ next: (prefix: string) => string }} Counter object with a next() method
+ *
+ * @example
+ *   const counter = _createCounter();
+ *   counter.next("where_age")    // → "where_age_0"
+ *   counter.next("where_name")   // → "where_name_1"
+ *   counter.next("where_status") // → "where_status_2"
  */
 function _createCounter() {
     let _count = 0;
@@ -24,29 +92,62 @@ function _createCounter() {
 }
 
 /**
- * Reset bind counter (no-op — counters are now per-call; kept for API compat).
+ * Reset bind counter — no-op.
+ *
+ * In older versions this reset a global counter. Now that counters are
+ * per-call (via _createCounter), there's nothing to reset.
+ * Kept for backward compatibility so existing code doesn't break.
  */
 function resetBindCounter() {
     // no-op: counters are scoped per parseFilter call
 }
 
+/**
+ * Maps MongoDB comparison operator names to their SQL equivalents.
+ * Used by _parseFieldExpr to translate operators like $gt → ">".
+ */
 const COMPARISON_OPS = {
-    $eq: "=",
-    $ne: "<>",
-    $gt: ">",
-    $gte: ">=",
-    $lt: "<",
-    $lte: "<=",
+    $eq: "=", // Equal
+    $ne: "<>", // Not equal
+    $gt: ">", // Greater than
+    $gte: ">=", // Greater than or equal
+    $lt: "<", // Less than
+    $lte: "<=", // Less than or equal
 };
 
+// ─── _parseFieldExpr ────────────────────────────────────────────
 /**
- * Parse a single field's operator expression into SQL fragments.
- * @param {string} field - Column name
- * @param {*} expr - Operator expression or scalar value
- * @param {Object} binds - Accumulator for bind variables
- * @param {string} outerAlias - Optional table alias for correlated subqueries
- * @param {Object} counter - Per-call bind counter
- * @returns {string} SQL condition fragment
+ * Converts a SINGLE field's filter expression into an SQL condition string.
+ *
+ * This is the workhorse of the filter parser. It handles every supported
+ * operator for a single column. It's called once per field in the filter.
+ *
+ * HOW IT WORKS:
+ *   1. If the expression is a plain value (string, number, null),
+ *      it creates an equality check: "field" = :bind_name
+ *
+ *   2. If the expression is an object with $ operators,
+ *      it iterates each operator and builds the corresponding SQL:
+ *      { $gt: 5, $lt: 10 } → '"age" > :where_age_0 AND "age" < :where_age_1'
+ *
+ * @param {string} field - The column name (e.g. "status")
+ * @param {*} expr - The filter value or operator object
+ *   - Plain value:  "active"  → equality check
+ *   - Null:         null      → IS NULL
+ *   - Operator obj: { $gte: 18 } → comparison
+ * @param {Object} binds - The bind variable accumulator (mutated — values added here)
+ * @param {string} outerAlias - Table alias for correlated subqueries (usually "t0")
+ * @param {Object} counter - Per-call bind counter from _createCounter()
+ * @returns {string} A SQL condition fragment (e.g. '"age" >= :where_age_0')
+ *
+ * @example
+ *   // Simple equality
+ *   _parseFieldExpr("status", "active", binds, null, counter)
+ *   // → '"status" = :where_status_0'  (binds now has { where_status_0: "active" })
+ *
+ *   // Multiple operators on one field
+ *   _parseFieldExpr("age", { $gte: 18, $lt: 65 }, binds, null, counter)
+ *   // → '("age" >= :where_age_0 AND "age" < :where_age_1)'
  */
 function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
     const qField = quoteIdentifier(field);
@@ -273,8 +374,39 @@ function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
         : conditions[0];
 }
 
+// ─── _buildCorrelatedSubquery ────────────────────────────────────
 /**
- * Build a correlated scalar subquery for use in WHERE comparisons.
+ * Builds a correlated scalar subquery for use in WHERE comparisons.
+ *
+ * A CORRELATED SUBQUERY is a subquery that references a column from
+ * the OUTER (main) query. It's re-evaluated for EACH row of the outer query.
+ *
+ * Example use case:
+ *   "Find employees whose salary is above their department's average"
+ *   → WHERE "salary" > (SELECT AVG("salary") FROM "employees" WHERE "dept_id" = t0."dept_id")
+ *
+ * The $outer. prefix is how the library knows a value refers to the outer query:
+ *   { dept_id: "$outer.dept_id" } → "dept_id" = t0."dept_id"
+ *
+ * @param {string} field - The column being compared (for naming bind variables)
+ * @param {Object} spec - Subquery specification:
+ *   - collection: The table to query
+ *   - field: The column to SELECT (optional, default "*")
+ *   - aggregate: Aggregate function like "$avg", "$sum" (optional)
+ *   - where: Filter conditions (supports $outer. references)
+ * @param {Object} binds - Bind variable accumulator (mutated)
+ * @param {string} outerAlias - The alias of the outer table (usually "t0")
+ * @param {Object} counter - Per-call bind counter
+ * @returns {string} SQL subquery string like '(SELECT AVG("salary") FROM "employees" WHERE ...)'
+ *
+ * @example
+ *   _buildCorrelatedSubquery("salary", {
+ *     collection: "employees",
+ *     aggregate: "$avg",
+ *     field: "salary",
+ *     where: { dept_id: "$outer.dept_id" }
+ *   }, binds, "t0", counter)
+ *   // → '(SELECT AVG("salary") FROM "employees" WHERE "dept_id" = t0."dept_id")'
  */
 function _buildCorrelatedSubquery(field, spec, binds, outerAlias, counter) {
     const collection = quoteIdentifier(spec.collection);
@@ -310,13 +442,56 @@ function _buildCorrelatedSubquery(field, spec, binds, outerAlias, counter) {
     return `(SELECT ${selectExpr} FROM ${collection}${whereStr})`;
 }
 
+// ─── parseFilter (MAIN ENTRY POINT) ─────────────────────────────
 /**
- * Parse a MongoDB-style filter object into an Oracle WHERE clause with bind variables.
+ * The main function of this file. Converts a MongoDB-style filter object
+ * into an Oracle WHERE clause with bind variables.
  *
- * @param {Object} filter - MongoDB-style filter, e.g. { status: 'active', age: { $gte: 18 } }
- * @param {string} [tableAlias] - Optional alias for the main table (for correlated subqueries)
- * @param {Object} [_counter] - Internal: shared counter for recursive calls (do not pass externally)
+ * This is the function you'll call from outside this file. Everything
+ * else in this file is a helper that parseFilter delegates to.
+ *
+ * HOW IT WORKS:
+ *   1. Creates a fresh bind counter (for concurrency safety)
+ *   2. Iterates each key in the filter object:
+ *      - If the key is $and, $or, $nor, $not → handles logical operators
+ *      - If the key is $exists, $notExists → handles subquery existence checks
+ *      - Otherwise → treats the key as a column name and delegates to _parseFieldExpr
+ *   3. Joins all conditions with AND
+ *   4. Returns the WHERE clause string + the accumulated bind variables
+ *
+ * @param {Object} filter - MongoDB-style filter object.
+ *   Examples:
+ *     { status: "active" }                             → simple equality
+ *     { age: { $gte: 18 } }                            → comparison
+ *     { $or: [{ city: "Manila" }, { city: "Cebu" }] }  → logical OR
+ *     { status: "active", age: { $gte: 18 } }          → multiple conditions (AND)
+ *
+ * @param {string} [tableAlias] - Table alias for correlated subqueries (e.g. "t0")
+ *   You normally don't need to pass this — it's used internally.
+ *
+ * @param {Object} [_counter] - Internal: shared counter for recursive calls.
+ *   Don't pass this yourself — it's created automatically on the first call
+ *   and shared across recursive calls ($and, $or, $not, $nor).
+ *
  * @returns {{ whereClause: string, binds: Object }}
+ *   - whereClause: The SQL WHERE clause (e.g. 'WHERE "status" = :where_status_0')
+ *                  Empty string "" if filter is null/empty
+ *   - binds: Object mapping bind names to their values
+ *            (e.g. { where_status_0: "active" })
+ *
+ * @example
+ *   // Simple filter
+ *   parseFilter({ status: "active" })
+ *   // → { whereClause: 'WHERE "status" = :where_status_0',
+ *   //     binds: { where_status_0: "active" } }
+ *
+ *   // Complex filter with $or
+ *   parseFilter({
+ *     status: "active",
+ *     $or: [{ age: { $gte: 18 } }, { vip: true }]
+ *   })
+ *   // → { whereClause: 'WHERE "status" = :where_status_0 AND ("age" >= :where_age_1 OR "vip" = :where_vip_2)',
+ *   //     binds: { where_status_0: "active", where_age_1: 18, where_vip_2: true } }
  */
 function parseFilter(filter, tableAlias, _counter) {
     if (

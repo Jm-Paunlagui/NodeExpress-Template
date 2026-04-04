@@ -1,8 +1,39 @@
 "use strict";
 
 /**
- * @fileoverview Performance utilities: EXPLAIN PLAN, ANALYZE, materialized views.
- * Exposed as createPerformance(db) factory.
+ * ============================================================================
+ * performanceUtils.js — Oracle Performance & Materialized View Utilities
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Provides tools for analyzing and optimizing Oracle queries:
+ *
+ *   explainPlan()               — Show the execution plan for a query
+ *   analyze()                   — Gather table statistics (DBMS_STATS)
+ *   createMaterializedView()    — Create a materialized view from a query
+ *   refreshMaterializedView()   — Refresh a materialized view
+ *   dropMaterializedView()      — Drop a materialized view
+ *
+ * USAGE:
+ *   const { createPerformance } = require("./performanceUtils");
+ *   const perf = createPerformance(db);
+ *
+ *   // See how Oracle will execute a query
+ *   const plan = await perf.explainPlan(users.find({ status: "active" }));
+ *
+ *   // Gather fresh statistics for the optimizer
+ *   await perf.analyze("users");
+ *
+ *   // Create a materialized view for a complex report
+ *   await perf.createMaterializedView("active_users_mv",
+ *     users.find({ status: "active" }).project({ id: 1, name: 1 }),
+ *     { refreshMode: "fast", refreshOn: "commit" }
+ *   );
+ *
+ * PRIVILEGE HANDLING:
+ *   All methods detect Oracle privilege errors (ORA-01031, ORA-00942, etc.)
+ *   and throw descriptive error messages explaining what privilege is needed.
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -16,10 +47,12 @@ const {
 const PRIVILEGE_ERROR_CODES = [1031, 942, 1039, 1219, 12003];
 
 /**
- * Wrap an Oracle error with a helpful privilege message when the error
- * is caused by missing DBA/admin privileges.
+ * Wrap an Oracle error with a helpful privilege message.
+ * Detects common privilege-related ORA errors and re-throws with
+ * a message explaining what privilege the user needs.
+ *
  * @param {string} method - Method name for context
- * @param {Error} err - Original error
+ * @param {Error} err - Original Oracle error
  * @param {string} sql - SQL that was attempted
  * @param {string} requiredPrivilege - Description of the required privilege
  */
@@ -34,9 +67,15 @@ function _wrapPrivilegeError(method, err, sql, requiredPrivilege) {
 }
 
 /**
- * Create a performance utility instance bound to a db interface.
- * @param {Object} db - db interface from createDb
- * @returns {Object} performance utilities
+ * Create a performance utility instance bound to a database connection.
+ *
+ * @param {Object} db - db interface from createDb()
+ * @returns {Object} Object with: explainPlan(), analyze(),
+ *   createMaterializedView(), refreshMaterializedView(), dropMaterializedView()
+ *
+ * @example
+ *   const perf = createPerformance(db);
+ *   const plan = await perf.explainPlan(users.find({ active: true }));
  */
 function createPerformance(db) {
     return {

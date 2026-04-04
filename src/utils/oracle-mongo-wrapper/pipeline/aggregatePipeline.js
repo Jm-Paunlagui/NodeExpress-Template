@@ -1,8 +1,73 @@
 "use strict";
 
 /**
- * @fileoverview Translates MongoDB-style aggregation pipeline → Oracle SQL.
- * Uses CTE chaining: each stage becomes a CTE wrapping the previous.
+ * ============================================================================
+ * aggregatePipeline.js — MongoDB Aggregation Pipeline → Oracle SQL
+ * ============================================================================
+ *
+ * WHAT THIS FILE DOES:
+ *   Translates a MongoDB-style aggregation pipeline (an array of stages)
+ *   into Oracle SQL using CTE chaining (WITH ... AS).
+ *
+ * HOW IT WORKS:
+ *   Each pipeline stage becomes one CTE. The output of one stage feeds
+ *   into the next, like a conveyor belt:
+ *
+ *   pipeline: [$match, $group, $sort, $limit]
+ *       ↓
+ *   WITH "stage_0" AS (SELECT * FROM "orders" WHERE ...),
+ *        "stage_1" AS (SELECT region, SUM(amount) FROM "stage_0" GROUP BY region),
+ *        "stage_2" AS (SELECT * FROM "stage_1" ORDER BY ...)
+ *   SELECT * FROM "stage_2" FETCH FIRST 5 ROWS ONLY
+ *
+ * SUPPORTED STAGES:
+ *   $match       → WHERE clause (filter rows)
+ *   $group       → GROUP BY with aggregate functions (SUM, AVG, COUNT, etc.)
+ *   $sort        → ORDER BY
+ *   $limit       → FETCH FIRST N ROWS ONLY
+ *   $skip        → OFFSET N ROWS
+ *   $count       → SELECT COUNT(*) AS name
+ *   $project     → Select/transform specific columns
+ *   $addFields   → Add computed columns while keeping existing ones
+ *   $lookup      → JOIN another table
+ *   $lateralJoin → LATERAL join (correlated subquery as a join)
+ *   $out         → INSERT into another table
+ *   $merge       → MERGE INTO another table
+ *   $bucket      → Group values into ranges (CASE WHEN)
+ *   $facet       → Run multiple pipelines in parallel and combine results
+ *   $replaceRoot → Change the document root
+ *   $unwind      → (Basic support — passthrough for Oracle)
+ *   $having      → (Pseudo-stage — attached to preceding $group)
+ *
+ * SUPPORTED AGGREGATE EXPRESSIONS (inside $group, $project, $addFields):
+ *   $sum, $avg, $min, $max, $count, $first, $last
+ *   $add, $subtract, $mul, $divide (arithmetic)
+ *   $concat, $toUpper, $toLower, $substr (string operations)
+ *   $cond (conditional: CASE WHEN ... THEN ... ELSE ... END)
+ *   $ifNull (COALESCE - use first non-null value)
+ *   $dateToString (TO_CHAR with format)
+ *   $window (analytic/window functions — see windowFunctions.js)
+ *   $size (JSON_ARRAY_LENGTH)
+ *
+ * SPECIAL BEHAVIOR - $having:
+ *   $having is NOT a real pipeline stage. A pre-scan detects it and attaches
+ *   it to the preceding $group's _having property. This is because Oracle
+ *   requires HAVING to be in the same query as GROUP BY.
+ *
+ * KEY FUNCTIONS:
+ *   buildAggregateSQL()  → Main entry: pipeline[] → { sql, binds }
+ *   _buildGroup()        → GROUP BY with aggregates + HAVING
+ *   _buildAggExpr()      → Translates any aggregate expression → SQL
+ *   _fieldRef()          → Convert "$column" → quoted column reference
+ *   _fieldRefOrBind()    → Like _fieldRef but binds literal values
+ *   _buildCondExpr()     → Build CASE WHEN conditions
+ *   _buildProjectCols()  → Build SELECT columns for $project
+ *   _buildAddFieldsCols() → Build extra columns for $addFields
+ *   _buildLateralSub()   → Build LATERAL subquery
+ *   _buildMergeStage()   → Build MERGE INTO for $merge stage
+ *   _buildBucket()       → Build CASE-based grouping for $bucket
+ *   _buildSortString()   → Build ORDER BY string
+ * ============================================================================
  */
 
 const { quoteIdentifier } = require("../utils");
@@ -10,6 +75,9 @@ const { parseFilter } = require("../parsers/filterParser");
 
 /**
  * Create a per-call counter for unique bind variable names.
+ * Each buildAggregateSQL() call gets its own counter so parallel
+ * calls never produce colliding bind names.
+ *
  * @returns {{ next: (prefix: string) => string }}
  */
 function _createCounter() {
@@ -22,11 +90,18 @@ function _createCounter() {
 }
 
 /**
- * Build a full SQL query from a pipeline.
- * @param {string} tableName
- * @param {Array} pipeline
- * @param {Object} db - db interface (for oracledb constants)
- * @returns {{ sql: string, binds: Object }}
+ * Main entry point: convert an aggregation pipeline into Oracle SQL.
+ *
+ * @param {string} tableName - The base table name
+ * @param {Array} pipeline - Array of stage objects (e.g. [{ $match: {...} }, ...])
+ * @param {Object} db - db interface from createDb() (needed for oracledb constants)
+ * @returns {{ sql: string, binds: Object }} The SQL string and bind variables
+ *
+ * @example
+ *   const { sql, binds } = buildAggregateSQL("orders", [
+ *     { $match: { status: "completed" } },
+ *     { $group: { _id: "$region", total: { $sum: "$amount" } } },
+ *   ], db);
  */
 function buildAggregateSQL(tableName, pipeline, db) {
     const counter = _createCounter();
@@ -257,7 +332,21 @@ function buildAggregateSQL(tableName, pipeline, db) {
 }
 
 /**
- * Build GROUP BY clause with aggregate functions.
+ * Build a GROUP BY clause with aggregate functions and optional HAVING.
+ *
+ * Supports special grouping modes:
+ *   _id: null           → aggregate entire table (no GROUP BY)
+ *   _id: "$field"       → group by a single column
+ *   _id: { a: "$f1" }   → group by multiple columns with aliases
+ *   _id: { $rollup: [] } → ROLLUP grouping
+ *   _id: { $cube: [] }   → CUBE grouping
+ *   _id: { $groupingSets: [] } → GROUPING SETS
+ *
+ * @param {Object} group - The $group stage value
+ * @param {string} source - Previous CTE alias or table name
+ * @param {Object} [having] - Optional HAVING conditions
+ * @param {Object} counter - Bind variable counter
+ * @returns {{ sql: string, binds: Object }}
  */
 function _buildGroup(group, source, having, counter) {
     const binds = {};
@@ -360,7 +449,18 @@ function _buildGroup(group, source, having, counter) {
 }
 
 /**
- * Build an aggregate expression (e.g. { $sum: '$amount' })
+ * Translate a MongoDB aggregate expression into Oracle SQL.
+ *
+ * This handles all the $ operators used inside $group, $project, $addFields:
+ *   { $sum: "$amount" }  → SUM("amount")
+ *   { $avg: "$price" }   → AVG("price")
+ *   { $cond: { if: {...}, then: X, else: Y } } → CASE WHEN ... THEN X ELSE Y END
+ *   etc.
+ *
+ * @param {Object} expr - The expression object (e.g. { $sum: "$amount" })
+ * @param {Object} binds - Bind variables accumulator (mutated)
+ * @param {Object} counter - Bind name counter
+ * @returns {string} Oracle SQL expression
  */
 function _buildAggExpr(expr, binds, counter) {
     if (typeof expr === "object") {
@@ -456,6 +556,12 @@ function _buildAggExpr(expr, binds, counter) {
     return String(expr);
 }
 
+/**
+ * Convert a value to a column reference.
+ * "$amount" → '"amount"' (quoted column name)
+ * "*"       → '*'
+ * 42        → '42'
+ */
 function _fieldRef(val) {
     if (typeof val === "string" && val.startsWith("$")) {
         return quoteIdentifier(val.substring(1));
@@ -465,6 +571,11 @@ function _fieldRef(val) {
     return quoteIdentifier(val);
 }
 
+/**
+ * Convert a value to either a column reference (if starts with $)
+ * or a bind variable (if it's a literal string/number/boolean).
+ * This ensures literal values are NEVER interpolated into SQL.
+ */
 function _fieldRefOrBind(val, binds, counter) {
     if (typeof val === "string" && val.startsWith("$")) {
         return quoteIdentifier(val.substring(1));
@@ -482,6 +593,10 @@ function _fieldRefOrBind(val, binds, counter) {
     return String(val);
 }
 
+/**
+ * Build a SQL condition for $cond expressions.
+ * { $amount: { $gt: 100 } } → '"amount" > :cond_0'
+ */
 function _buildCondExpr(cond, binds, counter) {
     // Simple condition: { field: { $gt: value } }
     if (typeof cond === "object") {
@@ -512,6 +627,10 @@ function _buildCondExpr(cond, binds, counter) {
     return "1=1";
 }
 
+/**
+ * Build an ORDER BY string from a sort spec.
+ * { total: -1, name: 1 } → '"TOTAL" DESC, "NAME" ASC'
+ */
 function _buildSortString(sortSpec) {
     return Object.entries(sortSpec)
         .map(
@@ -521,6 +640,14 @@ function _buildSortString(sortSpec) {
         .join(", ");
 }
 
+/**
+ * Build SELECT columns for a $project stage.
+ *
+ * Handles:
+ *   - { col: 1 }             → include column as-is
+ *   - { alias: "$col" }      → rename a column
+ *   - { alias: { $sum: .. }} → computed expression with alias
+ */
 function _buildProjectCols(project, counter) {
     const parts = [];
     const binds = {};
@@ -539,6 +666,10 @@ function _buildProjectCols(project, counter) {
     return { cols: parts.length > 0 ? parts.join(", ") : "*", binds };
 }
 
+/**
+ * Build extra computed columns for $addFields stage.
+ * Existing columns are kept (SELECT prev.*, newCol1, newCol2).
+ */
 function _buildAddFieldsCols(addFields, counter) {
     const binds = {};
     const parts = [];
@@ -557,6 +688,12 @@ function _buildAddFieldsCols(addFields, counter) {
     return { sql: parts.join(", "), binds };
 }
 
+/**
+ * Build a LATERAL subquery for $lateralJoin.
+ *
+ * A lateral join is like a correlated subquery used as a join source.
+ * Values prefixed with "$outer." reference the outer table's columns.
+ */
 function _buildLateralSub(lj, prevSource) {
     if (lj.subquery && typeof lj.subquery._buildSQL === "function") {
         let { sql, binds } = lj.subquery._buildSQL();
@@ -577,6 +714,10 @@ function _buildLateralSub(lj, prevSource) {
     return { sql: "SELECT 1 FROM DUAL", binds: {} };
 }
 
+/**
+ * Build a MERGE INTO statement for the $merge pipeline stage.
+ * Merges results from the pipeline into a target table.
+ */
 function _buildMergeStage(merge, source) {
     const into = quoteIdentifier(merge.into);
     const onCols = Object.entries(merge.on)
@@ -587,6 +728,12 @@ function _buildMergeStage(merge, source) {
     return `MERGE INTO ${into} tgt USING (SELECT * FROM ${source}) src ON (${onCols}) WHEN MATCHED THEN UPDATE SET tgt.updated = SYSDATE WHEN NOT MATCHED THEN INSERT VALUES (src.*)`;
 }
 
+/**
+ * Build a CASE-based bucket grouping for the $bucket stage.
+ *
+ * Groups values into ranges using CASE WHEN expressions.
+ * Example: boundaries [0, 100, 500] creates buckets: 0-99, 100-499
+ */
 function _buildBucket(bucket, source, counter) {
     const binds = {};
     const { groupBy, boundaries, default: defaultBucket, output } = bucket;
