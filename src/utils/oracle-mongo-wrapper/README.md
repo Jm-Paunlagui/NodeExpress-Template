@@ -21,10 +21,10 @@ Oracle Database
 - [Setup](#setup)
     - [Prerequisites — Database Configuration](#prerequisites--database-configuration)
     - [Imports & Connection](#imports--connection)
-- [🟢 Basic — Your First Queries](#-basic--your-first-queries)
-- [🟡 Medium — Filtering, Updating & Chaining](#-medium--filtering-updating--chaining)
-- [🔴 Hard — Aggregation, Transactions & Joins](#-hard--aggregation-transactions--joins)
-- [⚫ Advanced — Window Functions, CTEs, Hierarchies & More](#-advanced--window-functions-ctes-hierarchies--more)
+- [Basic — Your First Queries](#-basic--your-first-queries)
+- [Medium — Filtering, Updating & Chaining](#-medium--filtering-updating--chaining)
+- [Hard — Aggregation, Transactions & Joins](#-hard--aggregation-transactions--joins)
+- [Advanced — Window Functions, CTEs, Hierarchies & More](#-advanced--window-functions-ctes-hierarchies--more)
 - [Operator Reference](#operator-reference)
 
 ---
@@ -77,11 +77,10 @@ DB_SERVICE_NAME=ORCL
 UA_DB_USERNAME=your_username
 UA_DB_PASSWORD=your_password
 
-# "sampleInventory" connection credentials (production)
+# Add more connections as needed — just follow the pattern
+# for environment-specific configs, you can do:
 SI_DB_USERNAME=inventory_user
 SI_DB_PASSWORD=inventory_pass
-
-# "sampleInventory" uses a separate test DB in development mode
 SI_TEST_DB_USERNAME=test_user
 SI_TEST_DB_PASSWORD=test_pass
 DB_TEST_HOST=test-oracle-host.example.com
@@ -179,7 +178,7 @@ That's it. `db` is your gateway to everything.
 
 ---
 
-## 🟢 Basic — Your First Queries
+## Basic — Your First Queries
 
 > Things you'll use every day: creating tables, inserting data, finding rows, simple updates, and deletes.
 
@@ -274,7 +273,7 @@ await users.drop(); // ⚠️ Permanent! Deletes the table and all its data
 
 ---
 
-## 🟡 Medium — Filtering, Updating & Chaining
+## Medium — Filtering, Updating & Chaining
 
 > Comparison operators, chaining find queries, pagination, projections, and advanced update operators.
 
@@ -455,7 +454,7 @@ await users.dropIndex("IDX_users_email");
 
 ---
 
-## 🔴 Hard — Aggregation, Transactions & Joins
+## Hard — Aggregation, Transactions & Joins
 
 > Aggregation pipelines, grouping, joining tables, transactions with savepoints, MERGE/UPSERT, and set operations.
 

@@ -141,6 +141,8 @@ try {
     throw err;
 }
 
+oracledb.fetchArraySize = 1000; // Reduce internal round-trips for bulk reads (default: 100)
+
 const OUT_FORMAT_OBJECT = oracledb.OUT_FORMAT_OBJECT;
 const SYSDBA_PRIVILEGE = oracledb.SYSDBA_PRIVILEGE;
 
@@ -166,6 +168,7 @@ const POOL_DEFAULTS = {
 const EXECUTE_OPTIONS = Object.freeze({
     outFormat: OUT_FORMAT_OBJECT,
     autoCommit: true,
+    fetchArraySize: 1000,
 });
 
 const poolRegistry = new Map(); // name → Promise<Pool>
@@ -379,7 +382,6 @@ async function withConnection(connectionName, callback) {
                 `Timed out getting connection from "${connectionName}"`,
             ),
         ]);
-        await conn.ping();
 
         const result = await callback(conn);
         const elapsed = Date.now() - start;
@@ -422,24 +424,17 @@ async function withConnection(connectionName, callback) {
  */
 async function withTransaction(connectionName, callback) {
     return withConnection(connectionName, async (conn) => {
-        let committed = false;
         try {
             const result = await callback(conn);
             await conn.commit();
-            committed = true;
             return result;
         } catch (err) {
-            if (!committed) {
-                try {
-                    await conn.rollback();
-                } catch (e) {
-                    logger.error(
-                        oracleMessages.ROLLBACK_FAILED(
-                            connectionName,
-                            e.message,
-                        ),
-                    );
-                }
+            try {
+                await conn.rollback();
+            } catch (e) {
+                logger.error(
+                    oracleMessages.ROLLBACK_FAILED(connectionName, e.message),
+                );
             }
             throw err;
         }

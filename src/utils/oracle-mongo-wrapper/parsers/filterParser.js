@@ -336,6 +336,10 @@ function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
                 Object.assign(binds, subBinds);
                 conditions.push(`${qField} IN (${subSql.sql || subSql})`);
             } else {
+                // SECURITY WARNING: Raw SQL string fallback — caller is responsible
+                // for ensuring `val` is safe. This path exists for power-user escape
+                // hatches (e.g. hand-written subqueries). Never pass unsanitized
+                // user input through this path.
                 conditions.push(`${qField} IN (${val})`);
             }
         } else if (
@@ -344,7 +348,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
             op === "$gteAny" ||
             op === "$lteAny"
         ) {
-            const cmpOp = op.replace("Any", "").replace("$", "");
+            const cmpOp = op.replace(/Any/g, "").replace(/\$/g, "");
             const cmpMap = { gt: ">", lt: "<", gte: ">=", lte: "<=" };
             const subCollection = quoteIdentifier(val.collection);
             const subField = quoteIdentifier(val.field);
@@ -357,7 +361,7 @@ function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
             op === "$gteAll" ||
             op === "$lteAll"
         ) {
-            const cmpOp = op.replace("All", "").replace("$", "");
+            const cmpOp = op.replace(/All/g, "").replace(/\$/g, "");
             const cmpMap = { gt: ">", lt: "<", gte: ">=", lte: "<=" };
             const subCollection = quoteIdentifier(val.collection);
             const subField = quoteIdentifier(val.field);

@@ -109,12 +109,26 @@ function buildAggregateSQL(tableName, pipeline, db) {
     const allBinds = {};
     let prevSource = quoteIdentifier(tableName);
     let stageIdx = 0;
+    let outTable = null;
 
     // Pre-scan for $having — attach to preceding $group
     for (let i = 0; i < pipeline.length; i++) {
         if (pipeline[i].$having && i > 0 && pipeline[i - 1].$group) {
             pipeline[i - 1]._having = pipeline[i].$having;
             pipeline.splice(i, 1);
+            i--;
+        }
+    }
+
+    // Merge adjacent $match stages into a single $match with $and.
+    // Fewer CTEs means the optimizer sees one WHERE clause instead of
+    // chained single-predicate CTEs.
+    for (let i = 0; i < pipeline.length - 1; i++) {
+        if (pipeline[i].$match && pipeline[i + 1].$match) {
+            pipeline[i] = {
+                $match: { $and: [pipeline[i].$match, pipeline[i + 1].$match] },
+            };
+            pipeline.splice(i + 1, 1);
             i--;
         }
     }
@@ -158,7 +172,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
             case "$limit": {
                 ctes.push({
                     alias: stageAlias,
-                    sql: `SELECT * FROM ${prevSource} FETCH FIRST ${stage.$limit} ROWS ONLY`,
+                    sql: `SELECT * FROM ${prevSource} FETCH FIRST ${Number(stage.$limit)} ROWS ONLY`,
                 });
                 break;
             }
@@ -166,7 +180,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
             case "$skip": {
                 ctes.push({
                     alias: stageAlias,
-                    sql: `SELECT * FROM ${prevSource} OFFSET ${stage.$skip} ROWS`,
+                    sql: `SELECT * FROM ${prevSource} OFFSET ${Number(stage.$skip)} ROWS`,
                 });
                 break;
             }
@@ -174,7 +188,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
             case "$count": {
                 ctes.push({
                     alias: stageAlias,
-                    sql: `SELECT COUNT(*) AS ${stage.$count.toUpperCase()} FROM ${prevSource}`,
+                    sql: `SELECT COUNT(*) AS ${quoteIdentifier(stage.$count.toUpperCase())} FROM ${prevSource}`,
                 });
                 break;
             }
@@ -227,10 +241,9 @@ function buildAggregateSQL(tableName, pipeline, db) {
             }
 
             case "$out": {
-                ctes.push({
-                    alias: stageAlias,
-                    sql: `INSERT INTO ${quoteIdentifier(stage.$out)} SELECT * FROM ${prevSource}`,
-                });
+                // Don't push a CTE — store the target table.
+                // INSERT INTO is prepended to the final assembled SQL.
+                outTable = stage.$out;
                 break;
             }
 
@@ -263,7 +276,7 @@ function buildAggregateSQL(tableName, pipeline, db) {
                         db,
                     );
                     facetCtes.push(
-                        `SELECT '${facetName}' AS facet_name, sub.* FROM (${sql}) sub`,
+                        `SELECT '${facetName.replace(/'/g, "''")}' AS "facet_name", sub.* FROM (${sql}) sub`,
                     );
                 }
                 ctes.push({
@@ -276,10 +289,14 @@ function buildAggregateSQL(tableName, pipeline, db) {
             case "$replaceRoot": {
                 // Use the expression as the new root
                 const newRoot = stage.$replaceRoot.newRoot;
-                if (typeof newRoot === "string" && newRoot.startsWith("$")) {
+                const fieldName =
+                    typeof newRoot === "string" && newRoot.startsWith("$")
+                        ? newRoot.substring(1)
+                        : null;
+                if (fieldName) {
                     ctes.push({
                         alias: stageAlias,
-                        sql: `SELECT ${newRoot.substring(1)}.* FROM ${prevSource}`,
+                        sql: `SELECT ${quoteIdentifier(fieldName)}.* FROM ${prevSource}`,
                     });
                 } else {
                     ctes.push({
@@ -318,7 +335,11 @@ function buildAggregateSQL(tableName, pipeline, db) {
     }
 
     if (ctes.length === 1) {
-        return { sql: ctes[0].sql, binds: allBinds };
+        let sql = ctes[0].sql;
+        if (outTable) {
+            sql = `INSERT INTO ${quoteIdentifier(outTable)} ${sql}`;
+        }
+        return { sql, binds: allBinds };
     }
 
     // Build WITH ... AS chain
@@ -327,7 +348,10 @@ function buildAggregateSQL(tableName, pipeline, db) {
         .map((c) => `${quoteIdentifier(c.alias)} AS (${c.sql})`);
     const lastCte = ctes[ctes.length - 1];
 
-    const sql = `WITH ${withParts.join(",\n     ")}\n${lastCte.sql}`;
+    let sql = `WITH ${withParts.join(",\n     ")}\n${lastCte.sql}`;
+    if (outTable) {
+        sql = `INSERT INTO ${quoteIdentifier(outTable)} ${sql}`;
+    }
     return { sql, binds: allBinds };
 }
 
@@ -395,7 +419,7 @@ function _buildGroup(group, source, having, counter) {
                         ? fieldRef.substring(1)
                         : alias;
                 selectParts.push(
-                    `${quoteIdentifier(col)} AS ${quoteIdentifier(alias)}`,
+                    `${quoteIdentifier(col)} AS ${quoteIdentifier(alias.toUpperCase())}`,
                 );
                 groupByParts.push(quoteIdentifier(col));
             }
@@ -408,7 +432,9 @@ function _buildGroup(group, source, having, counter) {
         if (alias === "_id") continue;
         const aggSql = _buildAggExpr(expr, binds, counter);
         aliasToExpr[alias] = aggSql;
-        selectParts.push(`${aggSql} AS ${alias.toUpperCase()}`);
+        selectParts.push(
+            `${aggSql} AS ${quoteIdentifier(alias.toUpperCase())}`,
+        );
     }
 
     let sql = `SELECT ${selectParts.join(", ")} FROM ${source}`;
@@ -518,12 +544,15 @@ function _buildAggExpr(expr, binds, counter) {
                     return `LOWER(${_fieldRef(val)})`;
                 case "$substr": {
                     if (Array.isArray(val)) {
-                        return `SUBSTR(${_fieldRef(val[0])}, ${val[1]}, ${val[2]})`;
+                        return `SUBSTR(${_fieldRef(val[0])}, ${Number(val[1])}, ${Number(val[2])})`;
                     }
                     return _fieldRef(val);
                 }
                 case "$dateToString": {
-                    const fmt = val.format || "YYYY-MM-DD";
+                    const fmt = (val.format || "YYYY-MM-DD").replace(
+                        /'/g,
+                        "''",
+                    );
                     return `TO_CHAR(${_fieldRef(val.date)}, '${fmt}')`;
                 }
                 case "$cond": {
@@ -656,11 +685,11 @@ function _buildProjectCols(project, counter) {
             parts.push(quoteIdentifier(col));
         } else if (typeof spec === "string" && spec.startsWith("$")) {
             parts.push(
-                `${quoteIdentifier(spec.substring(1))} AS ${col.toUpperCase()}`,
+                `${quoteIdentifier(spec.substring(1))} AS ${quoteIdentifier(col.toUpperCase())}`,
             );
         } else if (typeof spec === "object") {
             const expr = _buildAggExpr(spec, binds, counter);
-            parts.push(`${expr} AS ${col.toUpperCase()}`);
+            parts.push(`${expr} AS ${quoteIdentifier(col.toUpperCase())}`);
         }
     }
     return { cols: parts.length > 0 ? parts.join(", ") : "*", binds };
@@ -676,13 +705,15 @@ function _buildAddFieldsCols(addFields, counter) {
     for (const [alias, spec] of Object.entries(addFields)) {
         if (typeof spec === "object") {
             const expr = _buildAggExpr(spec, binds, counter);
-            parts.push(`${expr} AS ${alias.toUpperCase()}`);
+            parts.push(`${expr} AS ${quoteIdentifier(alias.toUpperCase())}`);
         } else if (typeof spec === "string" && spec.startsWith("$")) {
             parts.push(
-                `${quoteIdentifier(spec.substring(1))} AS ${alias.toUpperCase()}`,
+                `${quoteIdentifier(spec.substring(1))} AS ${quoteIdentifier(alias.toUpperCase())}`,
             );
         } else {
-            parts.push(`${spec} AS ${alias.toUpperCase()}`);
+            const bname = counter.next("addf");
+            binds[bname] = spec;
+            parts.push(`:${bname} AS ${quoteIdentifier(alias.toUpperCase())}`);
         }
     }
     return { sql: parts.join(", "), binds };
@@ -740,17 +771,28 @@ function _buildBucket(bucket, source, counter) {
     const col = groupBy.startsWith("$") ? groupBy.substring(1) : groupBy;
     const cases = [];
 
+    // Determine if boundaries are numeric — if so, use TO_CHAR for THEN labels
+    // so that the default bucket string doesn't cause ORA-00932 (inconsistent datatypes).
+    const numericBoundaries = boundaries.every((b) => typeof b === "number");
+
     for (let i = 0; i < boundaries.length - 1; i++) {
         const lo = counter.next("bkt");
         const hi = counter.next("bkt");
         binds[lo] = boundaries[i];
         binds[hi] = boundaries[i + 1];
+        const thenBind = counter.next("bkt");
+        binds[thenBind] =
+            numericBoundaries && defaultBucket
+                ? String(boundaries[i])
+                : boundaries[i];
         cases.push(
-            `WHEN ${quoteIdentifier(col)} >= :${lo} AND ${quoteIdentifier(col)} < :${hi} THEN ${boundaries[i]}`,
+            `WHEN ${quoteIdentifier(col)} >= :${lo} AND ${quoteIdentifier(col)} < :${hi} THEN :${thenBind}`,
         );
     }
     if (defaultBucket) {
-        cases.push(`ELSE '${defaultBucket}'`);
+        const defBind = counter.next("bkt");
+        binds[defBind] = String(defaultBucket);
+        cases.push(`ELSE :${defBind}`);
     }
 
     const bucketExpr = `CASE ${cases.join(" ")} END`;
@@ -759,7 +801,9 @@ function _buildBucket(bucket, source, counter) {
     if (output) {
         for (const [alias, agg] of Object.entries(output)) {
             const aggSql = _buildAggExpr(agg, binds, counter);
-            selectParts.push(`${aggSql} AS ${quoteIdentifier(alias)}`);
+            selectParts.push(
+                `${aggSql} AS ${quoteIdentifier(alias.toUpperCase())}`,
+            );
         }
     } else {
         selectParts.push("COUNT(*) AS count");
