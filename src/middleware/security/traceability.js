@@ -24,27 +24,25 @@ function createRequestMessage(req) {
     const url = req.originalUrl || req.url;
     let message = `[${req.method} @ ${url}]`;
 
-    // Query params
-    let paramsSection = "[PARAMS @ ";
+    // Query params (only include if present)
     if (Object.keys(req.query).length > 0) {
-        paramsSection += Object.entries(req.query)
+        const params = Object.entries(req.query)
             .map(([k, v]) => `${k}=${v}`)
             .join("&");
+        message += ` [PARAMS @ ${params}]`;
     }
-    paramsSection += "]";
-    message += ` ${paramsSection}`;
 
-    // Body (POST / PUT / PATCH)
-    let bodySection = "[BODY @ ";
+    // Body (only include for POST/PUT/PATCH and when there's content)
     if (["POST", "PUT", "PATCH"].includes(req.method)) {
+        let bodyContent = "";
         if (!req.body) {
-            bodySection += "req.body is undefined";
+            bodyContent = "req.body is undefined";
         } else if (typeof req.body !== "object") {
-            bodySection += `req.body is ${typeof req.body}: ${req.body}`;
+            bodyContent = `req.body is ${typeof req.body}: ${req.body}`;
         } else if (Object.keys(req.body).length === 0) {
-            bodySection += "req.body is empty object";
+            bodyContent = "req.body is empty object";
         } else {
-            bodySection += Object.entries(req.body)
+            bodyContent = Object.entries(req.body)
                 .map(([key, value]) => {
                     if (value === null) return `${key}=null`;
                     if (value === undefined) return `${key}=undefined`;
@@ -60,9 +58,8 @@ function createRequestMessage(req) {
                 })
                 .join(", ");
         }
+        message += ` [BODY @ ${bodyContent}]`;
     }
-    bodySection += "]";
-    message += ` ${bodySection}`;
 
     return message;
 }
