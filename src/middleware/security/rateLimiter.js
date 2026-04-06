@@ -131,8 +131,8 @@ const createLimiter = ({
     dryRun = false,
     label = "RateLimit",
 } = {}) => {
-    if (max <= 0) throw new RangeError("[RateLimit] max must be > 0");
-    if (windowMs <= 0) throw new RangeError("[RateLimit] windowMs must be > 0");
+    if (max <= 0) throw new RangeError("Rate Limit max must be > 0");
+    if (windowMs <= 0) throw new RangeError("Rate Limit windowMs must be > 0");
 
     const getKey =
         typeof keyBy === "function"
@@ -252,13 +252,13 @@ const getStats = () => store.getStats();
 
 const clearKey = (key) => {
     const n = store.del(key);
-    logger.info("[RateLimit] Key cleared", { key, deleted: n });
+    logger.info("Rate Limit Key cleared", { key, deleted: n });
     return n;
 };
 
 const flushAll = () => {
     store.flushAll();
-    logger.warn("[RateLimit] All data flushed");
+    logger.warn("Rate Limit All data flushed");
 };
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
