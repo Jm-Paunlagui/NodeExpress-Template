@@ -13,7 +13,6 @@ This project template provides a basic structure for building a Node.js Express 
 - Standard response format for API responses 
 - Standard error response format for API errors
 - Supports Oracle Database connection using oracledb
-- Supports MySQL Database connection using mysql2
 - Environment variable management with dotenv
 - Prevent Redirects for API routes to enhance security
 - Captures user and request tracing information in logs for better debugging and monitoring
@@ -24,6 +23,7 @@ This project template provides a basic structure for building a Node.js Express 
 - IP filtering middleware to restrict access to trusted IP addresses or ranges
 - Graceful shutdown handling to ensure proper cleanup of resources on server shutdown
 - OracleDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities (in `src/utils/oracle-mongo-wrapper/`)
+- PKG for compiling the Node.js application into a standalone executable (optional, can be set up later)
 
 ## Project Structure
 express-template/
@@ -61,7 +61,8 @@ express-template/
     │   │   └── preventRedirects.js     # Prevents automatic redirections for API security
     |   |
     │   ├── performance/
-    │   │   └── compression.js          # Compression middleware (gzip)
+    │   │   ├── compression.js          # Compression middleware (gzip)
+    |   |   └── cache.js                # Caching middleware (e.g. Node-cache or Redis [Preferably node-cache for simplicity])
     |   |
     │   ├── parsing/
     │   │   ├── bodyParser.js          # Body parsing middleware (JSON + URL-encoded)
@@ -111,7 +112,7 @@ export const getUser = catchAsync(async (req, res) => {
  
 ## API Response Shape
 Always use the standardized response format. Never return raw data.
-- for error responses: status + code + message + error details
+- for error responses: status + code + message + error details (include type, stack trace, and any relevant hints for debugging. and where the error occurred in the codebase if possible)
 - for success responses: status + code + message + data
  
 **Success:**
@@ -204,3 +205,52 @@ Auth routes:
 - `cors()` origin whitelist is in `src/config/constants.js` — update it for new environments
 - Prisma: run `npx prisma generate` after any schema change before starting the server
 - Rate limiter is per-IP by default — adjust `windowMs` and `max` in `middlewares/rateLimiter.js` for specific routes if needed
+- Cache middleware is in `middlewares/performance/cache.js` — use it on routes that can benefit from caching (e.g. GET requests with heavy DB queries)
+- Make Cache middleware configurable via route options (e.g. `cacheDuration`) for flexibility in different scenarios
+- Make cache keys unique per route and query parameters to avoid collisions and ensure correct caching behavior
+- Ensure that the cache middleware properly handles cache invalidation when underlying data changes (e.g. after POST/PUT/DELETE requests that modify data relevant to cached GET requests)
+
+## Server References
+- D:\Web\OPTISv2\OPITS-BE
+- You can review the OPTISv2 backend codebase to improve the structure and features of this template, especially for the OracleDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities in `src/utils/oracle-mongo-wrapper/`. This will help ensure that the template is robust and can handle complex database interactions effectively.
+- What the OPTISv2 backend doesn't have is the new Oracle MongoDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities in `src/utils/oracle-mongo-wrapper/`. This is a unique feature that can set this template apart and make it more versatile for developers who want to use OracleDB with a familiar MongoDB-like interface.
+- Analyze the OPTISv2 backend codebase to identify any additional features or improvements that can be incorporated into this template, such as enhanced error handling, better logging practices, or more efficient database connection management. This will help ensure that the template is not only functional but also follows best practices for building scalable and maintainable APIs.
+- The behavior of the OPITSv2 backend is that when i start it, the server first checks if the dependences are compatible with pkg, because i compile the backend in a executable file, and then it starts the server. This is a good practice to ensure that the application can run smoothly in different environments without dependency issues. You can consider adding a similar check in this template to enhance its robustness and compatibility when compiled into an executable using pkg.
+
+# OPTISv2 Reference Codebase Analysis
+
+## Key Architectural Differences from MEAL Template
+
+### What OPTISv2 has that MEAL should adopt:
+1. **PKG polyfills** (`encodingPolyfill.js`) - loaded first in server.js for compiled executable compatibility
+2. **Dual DB pool pattern** with PoolHealthMonitor (30s health checks, 3-strike unhealthy marking)
+3. **Exponential backoff** on pool init (3 retries, delay = min(1000*2^n, 10000))
+4. **Security filter middleware** - blocks path traversal, script injection, scanner requests, suspicious IPs
+5. **Machine identifier in logs** - hostname + IP for server identification
+6. **Request ID middleware** (nanoid per request, X-Request-Id header)
+7. **Response time tracking** with slow response detection
+8. **Performance middleware** tracking microsecond precision
+9. **Object pooling** for arrays/objects in high-frequency DB operations
+11. **Cache domains** organized by purpose (REAL_TIME, BUSINESS, REFERENCE, EXPORTS, LOGS)
+12. **Clustering support** (Master/Worker pattern, configurable via ENABLE_CLUSTERING)
+13. **Advanced CORS** supporting VPN, WFH, corporate, local network scenarios
+14. **Console manager** - process titles for pkg, ASCII art, daily clearing
+15. **Graceful batch processing** - partial success/failure without cascading
+
+### What OPTISv2 does differently (not necessarily better):
+- No controllers folder - routes call services directly (MEAL properly separates)
+- No catchAsync - uses direct try/catch in routes (MEAL has catchAsync, which is better)
+- Response format uses `success: true/false` vs MEAL's `status: "success"/"error"` with code
+- No AppError class - throws plain Error objects
+- Plain text password comparison (configurable, not always bcrypt)
+
+### What MEAL already has that OPTISv2 lacks:
+- oracle-mongo-wrapper library (unique to MEAL)
+- Proper controller layer separation
+- catchAsync utility
+- AppError with structured error responses
+- Standardized sendSuccess/sendError helpers
+- Adapter pattern for database (MySQL + Oracle)
+
+## What we dont need to change in MEAL:
+- 10. **Query optimizer** with Oracle hints (FIRST_ROWS, PARALLEL, USE_HASH, etc.)

@@ -23,7 +23,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { getConnectionConfig } = require("../database");
+const { getConnectionConfig, getConnectionNames } = require("../database");
 const { logger } = require("../../utils/logger");
 const { oracleMessages } = require("../../constants/messages");
 
@@ -134,8 +134,14 @@ try {
         setupOracleEnvironment();
     }
     oracledb = require("oracledb");
-    if (isCompiled) _initOracleClient(oracledb);
-    logger.info("oracledb driver loaded.");
+
+    // Always attempt Thick mode when ORACLE_INSTANT_CLIENT is set
+    // (not just for compiled executables). Thick mode supports all
+    // password verifier types; Thin mode rejects some (e.g. 0x939).
+    _initOracleClient(oracledb);
+
+    const mode = oracledb.oracleClientVersion ? "Thick" : "Thin";
+    logger.info(`oracledb driver loaded (${mode} mode).`);
 } catch (err) {
     logger.error(`Failed to load oracledb: ${err.message}`);
     throw err;
@@ -297,7 +303,13 @@ async function _createPool(name, dbConfig, attempt = 0) {
 
     _validateConfig(dbConfig, name);
 
-    const config = { ...POOL_DEFAULTS, ...dbConfig, poolAlias: `${name}_pool` };
+    // Unique alias per attempt to avoid NJS-046 collisions
+    const poolAlias = `${name}_pool_${Date.now()}_${attempt}`;
+    const config = {
+        ...POOL_DEFAULTS,
+        ...dbConfig,
+        poolAlias,
+    };
 
     // Safe log — no credentials
     const logSafe = { ...config };
@@ -305,13 +317,14 @@ async function _createPool(name, dbConfig, attempt = 0) {
     delete logSafe.user;
     logger.info(`Creating pool "${name}"…`);
 
+    let pool;
     try {
         if (isCompiled)
             config.connectString = config.connectString
                 .replace(/\s+/g, " ")
                 .trim();
 
-        const pool = await oracledb.createPool(config);
+        pool = await oracledb.createPool(config);
         const conn = await pool.getConnection();
         await conn.ping();
         await conn.close();
@@ -319,6 +332,15 @@ async function _createPool(name, dbConfig, attempt = 0) {
         logger.info(oracleMessages.POOL_READY(name, pool));
         return pool;
     } catch (err) {
+        // Destroy the partially-created pool so the alias is freed for retries
+        if (pool) {
+            try {
+                await pool.close(0);
+            } catch (_) {
+                /* ignore close errors */
+            }
+        }
+
         logger.error(
             oracleMessages.POOL_FAILED(
                 name,
@@ -352,6 +374,71 @@ function _getOrCreatePool(name) {
         poolRegistry.set(name, _createPool(name, config));
     }
     return poolRegistry.get(name);
+}
+
+// ── Eager pool initialization ──────────────────────────────────────────────────
+
+/**
+ * Pre-create all registered pools at startup.
+ * Logs each pool's config (sans credentials) and result.
+ * Non-fatal — a pool that fails will retry lazily on first use.
+ */
+async function initializePools() {
+    const names = getConnectionNames();
+    logger.info(
+        `Initializing ${names.length} database pool(s): ${names.join(", ")}`,
+    );
+
+    const results = [];
+    for (const name of names) {
+        try {
+            const config = getConnectionConfig(name);
+
+            // Log config metadata (no credentials)
+            const safeCfg = { ...POOL_DEFAULTS, ...config };
+            delete safeCfg.password;
+            delete safeCfg.user;
+            logger.info(`Creating ${name} pool with configuration:`, safeCfg);
+
+            const pool = await _getOrCreatePool(name);
+            logger.info(
+                `${name} pool created successfully with ${pool.poolMin}-${pool.poolMax} connections`,
+            );
+            results.push({ name, success: true });
+        } catch (err) {
+            // Clear registry so the pool can retry lazily on first use
+            poolRegistry.delete(name);
+
+            // Structured error with type, hint, and origin
+            const isNJS116 = err.message.includes("NJS-116");
+            const isNJS046 = err.message.includes("NJS-046");
+            const hint = isNJS116
+                ? "The DB password verifier is not supported in Thin mode. Set ORACLE_INSTANT_CLIENT in .env to enable Thick mode, or reset the DB user password with a compatible verifier."
+                : isNJS046
+                  ? "Pool alias collision during retry. The previous pool was not fully cleaned up."
+                  : "Check DB credentials, network connectivity, and Oracle client installation.";
+
+            logger.error(`Failed to initialize pool "${name}"`, {
+                error: err.message,
+                type: err.constructor.name,
+                stack: err.stack,
+                hint,
+                pool: name,
+                environment: process.env.NODE_ENV || "development",
+            });
+            results.push({ name, success: false, error: err.message });
+        }
+    }
+
+    const failed = results.filter((r) => !r.success);
+    if (failed.length) {
+        logger.warn(
+            `${failed.length}/${names.length} pool(s) failed to initialize: ${failed.map((f) => f.name).join(", ")}. They will retry on first use.`,
+        );
+    } else {
+        logger.info(`All ${names.length} pool(s) initialized successfully.`);
+    }
+    return results;
 }
 
 // ── Connection helpers ────────────────────────────────────────────────────────
@@ -552,27 +639,7 @@ async function closeAll() {
     logger.info(oracleMessages.ALL_POOLS_CLOSED);
 }
 
-["SIGINT", "SIGTERM", "SIGQUIT"].forEach((sig) => {
-    process.once(sig, async () => {
-        logger.info(oracleMessages.SIGNAL_RECEIVED(sig));
-        try {
-            await closeAll();
-            process.exit(0);
-        } catch {
-            process.exit(1);
-        }
-    });
-});
-process.once("uncaughtException", async (e) => {
-    logger.error(oracleMessages.UNCATCHED_EXCEPTION, e);
-    await closeAll();
-    process.exit(1);
-});
-process.once("unhandledRejection", async (r) => {
-    logger.error(oracleMessages.UNHANDLED_REJECTION, r);
-    await closeAll();
-    process.exit(1);
-});
+// Signal / exception handlers are in server.js — not duplicated here.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 4 — Internal utilities
@@ -600,6 +667,7 @@ module.exports = {
     withBatchConnection,
 
     // Pool management
+    initializePools,
     closeAll,
     getPoolStats,
     isPoolHealthy: (name) => healthMonitor.isHealthy(name),

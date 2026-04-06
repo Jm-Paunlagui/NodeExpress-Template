@@ -16,17 +16,8 @@
  * Sliding counter (this) → weighted blend of two fixed windows. O(1) memory,
  *   ~0.003% error rate in practice. Best balance of precision and efficiency.
  *
- * HOW IT WORKS:
- * ─────────────
- *   weight    = (windowMs - elapsed_in_current_window) / windowMs
- *   estimated = (prev_window_count × weight) + curr_window_count
- *
- *   If estimated >= max → reject.
- *   The "weight" smoothly fades out the previous window as time passes.
- *
  * USAGE:
- * ──────
- *   const limiter = require('../middleware/rateLimiter');
+ *   const limiter = require('../middleware/security/rateLimiter');
  *
  *   app.use('/api', limiter.default);             // global default
  *   router.post('/login', limiter.auth, handler); // strict auth routes
@@ -34,30 +25,21 @@
  *
  *   // Custom limiter
  *   const myLimiter = limiter.createLimiter({ max: 5, windowMs: 60_000 });
- *
- *   // Per-user limiting (after authenticate middleware)
- *   const userLimiter = limiter.createLimiter({ max: 200, keyBy: 'user' });
  */
 
 const NodeCache = require("node-cache");
-const logger = require("../utils/logger");
+const { logger } = require("../../utils/logger");
 
 // ─── Internal store ───────────────────────────────────────────────────────────
-// Dedicated cache instance — never shares space with app data.
 const store = new NodeCache({
-    stdTTL: 3600, // 1-hour hard cap prevents unbounded memory growth
-    checkperiod: 120, // sweep expired keys every 2 minutes
+    stdTTL: 3600,
+    checkperiod: 120,
     useClones: false,
     deleteOnExpire: true,
 });
 
 // ─── IP extraction ────────────────────────────────────────────────────────────
 
-/**
- * Safely extract the real client IP.
- * Trusts X-Forwarded-For only when TRUST_PROXY=true (set when behind nginx/LB).
- * Prevents IP spoofing by untrusted clients injecting X-Forwarded-For.
- */
 const extractIp = (req) => {
     if (process.env.TRUST_PROXY === "true") {
         const forwarded = req.headers["x-forwarded-for"];
@@ -72,30 +54,15 @@ const extractIp = (req) => {
 // ─── Key generators ───────────────────────────────────────────────────────────
 
 const keyGenerators = {
-    /** By client IP (default – always available, no auth required) */
     ip: (req) => `rl:ip:${extractIp(req)}`,
-
-    /** By authenticated user ID. Falls back to IP for unauthenticated requests. */
     user: (req) =>
         req.user?.sub ? `rl:user:${req.user.sub}` : `rl:ip:${extractIp(req)}`,
-
-    /** By API key header. Falls back to IP if header is absent. */
     apiKey: (req) => {
         const key = req.headers["x-api-key"];
         return key ? `rl:apikey:${key}` : `rl:ip:${extractIp(req)}`;
     },
-
-    /**
-     * By IP + route path.
-     * Isolates limits per-endpoint so one slow route can't drain the global budget.
-     */
     ipAndRoute: (req) =>
         `rl:ip+route:${extractIp(req)}:${req.route?.path || req.path}`,
-
-    /**
-     * By user (if authed) + route.
-     * Finest granularity — per-user, per-endpoint.
-     */
     userAndRoute: (req) => {
         const id = req.user?.sub || extractIp(req);
         return `rl:user+route:${id}:${req.route?.path || req.path}`;
@@ -104,33 +71,19 @@ const keyGenerators = {
 
 // ─── Sliding window counter ───────────────────────────────────────────────────
 
-/**
- * Core sliding window counter algorithm.
- *
- * Uses two adjacent fixed windows and weights the previous window's count
- * by how much of it still overlaps with the current sliding window.
- * This gives O(1) memory per key with near-perfect accuracy.
- *
- * @param {string} key
- * @param {number} windowMs
- * @param {number} max
- * @returns {{ allowed: boolean, count: number, remaining: number, resetAt: number }}
- */
 const slidingWindowCounter = (key, windowMs, max) => {
     const now = Date.now();
     const windowSec = windowMs / 1000;
-    const windowStart = Math.floor(now / windowMs) * windowMs; // epoch of current fixed window
+    const windowStart = Math.floor(now / windowMs) * windowMs;
     const prevKey = `${key}:${windowStart - windowMs}`;
     const currKey = `${key}:${windowStart}`;
 
     const prevCount = store.get(prevKey) ?? 0;
     const currCount = store.get(currKey) ?? 0;
 
-    // How far (0→1) into the current window are we?
     const elapsed = now - windowStart;
-    const weight = (windowMs - elapsed) / windowMs; // previous window's remaining share
+    const weight = (windowMs - elapsed) / windowMs;
 
-    // Weighted estimate of requests in the conceptual sliding window
     const estimated = prevCount * weight + currCount;
 
     const resetAt = windowStart + windowMs;
@@ -144,7 +97,6 @@ const slidingWindowCounter = (key, windowMs, max) => {
         };
     }
 
-    // Increment current window; TTL = 2× window so previous window survives long enough
     store.set(currKey, currCount + 1, windowSec * 2);
 
     const newEstimate = prevCount * weight + (currCount + 1);
@@ -159,52 +111,17 @@ const slidingWindowCounter = (key, windowMs, max) => {
 
 // ─── Header writer ────────────────────────────────────────────────────────────
 
-/**
- * Set IETF-standard rate-limit response headers.
- * https://www.ietf.org/archive/id/draft-ietf-httpapi-ratelimit-headers-07.txt
- */
 const setHeaders = (res, { limit, remaining, resetAt, windowMs }) => {
     const resetSec = Math.ceil(resetAt / 1000);
     const windowSec = Math.ceil(windowMs / 1000);
     res.setHeader("RateLimit-Limit", limit);
     res.setHeader("RateLimit-Remaining", remaining);
-    res.setHeader("RateLimit-Reset", resetSec); // Unix timestamp
+    res.setHeader("RateLimit-Reset", resetSec);
     res.setHeader("RateLimit-Policy", `${limit};w=${windowSec}`);
 };
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
-/**
- * Create a configurable rate-limiter middleware.
- *
- * @param {object}          [opts]
- * @param {number}          [opts.max=100]         Max requests per window
- * @param {number}          [opts.windowMs=900_000] Window size in ms
- * @param {string|Function} [opts.keyBy='ip']       Key strategy:
- *                                                   'ip' | 'user' | 'apiKey' |
- *                                                   'ipAndRoute' | 'userAndRoute' |
- *                                                   (req) => string
- * @param {Function}        [opts.skip]             (req) => bool  skip if true
- * @param {Function}        [opts.onLimit]          Custom block handler (req, res, info) => void
- * @param {boolean}         [opts.dryRun=false]     Log violations but never block
- * @param {string}          [opts.label]            Label for log messages
- *
- * @returns {import('express').RequestHandler}
- *
- * @example
- * // 60 req / min per user
- * const limiter = createLimiter({ max: 60, windowMs: 60_000, keyBy: 'user' });
- *
- * // Skip admin IPs entirely
- * const limiter = createLimiter({
- *   skip: (req) => process.env.ADMIN_IPS?.split(',').includes(extractIp(req)),
- * });
- *
- * // Per-tenant key
- * const limiter = createLimiter({
- *   keyBy: (req) => `tenant:${req.headers['x-tenant-id'] || 'anon'}`,
- * });
- */
 const createLimiter = ({
     max = 100,
     windowMs = 900_000,
@@ -223,11 +140,9 @@ const createLimiter = ({
             : (keyGenerators[keyBy] ?? keyGenerators.ip);
 
     return (req, res, next) => {
-        // Always let OPTIONS and health checks pass
         if (req.method === "OPTIONS" || req.path === "/api/health")
             return next();
 
-        // Custom skip predicate
         if (skip?.(req)) return next();
 
         const key = getKey(req);
@@ -266,9 +181,15 @@ const createLimiter = ({
                 });
 
             return res.status(429).json({
+                status: "error",
+                code: 429,
+                message: "Too many requests. Please try again later.",
                 error: {
-                    message: "Too many requests. Please try again later.",
-                    retryAfter,
+                    type: "RateLimitExceeded",
+                    details: [
+                        { field: "retryAfter", issue: `${retryAfter} seconds` },
+                    ],
+                    hint: "Wait before retrying.",
                 },
             });
         }
@@ -285,10 +206,6 @@ const createLimiter = ({
 
 // ─── Presets ──────────────────────────────────────────────────────────────────
 
-/**
- * 100 req / 15 min – general API traffic, keyed by IP.
- * Configurable via RATE_LIMIT_MAX + RATE_LIMIT_WINDOW_MS env vars.
- */
 const defaultLimiter = createLimiter({
     max: parseInt(process.env.RATE_LIMIT_MAX || "100", 10),
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000", 10),
@@ -296,10 +213,6 @@ const defaultLimiter = createLimiter({
     label: "RateLimit:default",
 });
 
-/**
- * 10 req / 15 min – login, register, OTP, forgot-password.
- * Tight window forces long pauses between brute-force attempts.
- */
 const authLimiter = createLimiter({
     max: 10,
     windowMs: 15 * 60 * 1000,
@@ -307,17 +220,18 @@ const authLimiter = createLimiter({
     label: "RateLimit:auth",
     onLimit: (req, res, { retryAfter }) =>
         res.status(429).json({
+            status: "error",
+            code: 429,
+            message: "Too many attempts. Please wait before trying again.",
             error: {
-                message: "Too many attempts. Please wait before trying again.",
-                retryAfter,
+                type: "RateLimitExceeded",
+                details: [
+                    { field: "retryAfter", issue: `${retryAfter} seconds` },
+                ],
             },
         }),
 });
 
-/**
- * 5 req / 1 min – expensive endpoints (PDF export, report generation).
- * Keyed by user so authenticated users have their own isolated budget.
- */
 const burstLimiter = createLimiter({
     max: 5,
     windowMs: 60_000,
@@ -325,11 +239,6 @@ const burstLimiter = createLimiter({
     label: "RateLimit:burst",
 });
 
-/**
- * 30 req / 1 min – per-IP, per-route.
- * Prevents a user hammering one specific endpoint without
- * affecting their overall API allowance.
- */
 const perRouteLimiter = createLimiter({
     max: 30,
     windowMs: 60_000,
@@ -339,20 +248,14 @@ const perRouteLimiter = createLimiter({
 
 // ─── Introspection ────────────────────────────────────────────────────────────
 
-/** Current store stats – hits, misses, key count. For monitoring endpoints. */
 const getStats = () => store.getStats();
 
-/**
- * Manually clear a specific key (e.g. unban a user after admin review).
- * @param {string} key – e.g. 'rl:ip:1.2.3.4'
- */
 const clearKey = (key) => {
     const n = store.del(key);
     logger.info("[RateLimit] Key cleared", { key, deleted: n });
     return n;
 };
 
-/** Flush ALL rate-limit data. Use with caution in production. */
 const flushAll = () => {
     store.flushAll();
     logger.warn("[RateLimit] All data flushed");
@@ -361,20 +264,13 @@ const flushAll = () => {
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
-    // Ready-to-use middleware presets
     default: defaultLimiter,
     auth: authLimiter,
     burst: burstLimiter,
     perRoute: perRouteLimiter,
-
-    // Factory for custom limiters
     createLimiter,
-
-    // Key generators (for composing custom key strategies)
     keyGenerators,
     extractIp,
-
-    // Introspection / admin
     getStats,
     clearKey,
     flushAll,

@@ -14,7 +14,7 @@ const {
 // ─── Table Column Schemas ─────────────────────────────────────────────────────
 
 const SAPBook = {
-    table: "DEV_BOOK",
+    table: "INV_BOOK",
     columns: [
         "ID",
         "DIVISION",
@@ -35,7 +35,7 @@ const SAPBook = {
 };
 
 const StorageLocation = {
-    table: "DEV_LOCATION",
+    table: "INV_LOCATION",
     columns: [
         "ID",
         "DIVISION",
@@ -58,12 +58,12 @@ const StorageLocation = {
 };
 
 const UnlockedInventoryByMonth = {
-    table: "DEV_LOCK",
+    table: "INV_LOCK",
     columns: ["ID", "MONTH", "LAST_CHANGE_BY", "AUTO_GR", "ACTIVE"],
 };
 
 const MaterialMaster = {
-    table: "DEV_MATERIAL",
+    table: "INV_MATMAS",
     columns: [
         "ID",
         "DIVISION",
@@ -86,7 +86,7 @@ const MaterialMaster = {
 };
 
 const InventoryStocks = {
-    table: "DEV_STOCKS",
+    table: "INV_STOCKS",
     columns: [
         "ID",
         "DIVISION",
@@ -115,7 +115,7 @@ const InventoryStocks = {
 };
 
 const InventoryUnit = {
-    table: "DEV_UNIT",
+    table: "INV_UNIT",
     columns: [
         "ID",
         "DIVISION",
@@ -176,7 +176,7 @@ const SEP = (ch, w) => ch.repeat(w);
 
 // ─── Report Parameters ────────────────────────────────────────────────────────
 const REPORT_YEAR = 2026;
-const REPORT_MONTH = 3;
+const REPORT_MONTH = 2;
 const REPORT_DIVISION = "ADAS";
 
 async function generateInventoryReport() {
