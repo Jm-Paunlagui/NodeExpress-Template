@@ -6,9 +6,9 @@
  * @since 2025-08-16
  */
 
-const fs = require('fs').promises;
-const path = require('path');
-const os = require('os');
+const fs = require("fs").promises;
+const path = require("path");
+const os = require("os");
 
 class Logger {
     // ========================================
@@ -26,44 +26,50 @@ class Logger {
         },
 
         COLORS: {
-            ERROR: '\x1b[31m',
-            WARN: '\x1b[33m',
-            INFO: '\x1b[36m',
-            DEBUG: '\x1b[35m',
-            MACHINE_ID: '\x1b[94m',
-            TIMESTAMP: '\x1b[90m',
-            PID: '\x1b[92m',
-            LOCATION: '\x1b[93m',
-            REQUEST_PHASE: '\x1b[95m',
-            METHOD: '\x1b[96m',
-            MESSAGE: '\x1b[97m',
-            RESET: '\x1b[0m',
-            BRACKET: '\x1b[37m',
-            SEPARATOR: '\x1b[37m',
+            ERROR: "\x1b[31m",
+            WARN: "\x1b[33m",
+            INFO: "\x1b[36m",
+            DEBUG: "\x1b[35m",
+            MACHINE_ID: "\x1b[94m",
+            TIMESTAMP: "\x1b[90m",
+            PID: "\x1b[92m",
+            LOCATION: "\x1b[93m",
+            REQUEST_PHASE: "\x1b[95m",
+            METHOD: "\x1b[96m",
+            MESSAGE: "\x1b[97m",
+            RESET: "\x1b[0m",
+            BRACKET: "\x1b[37m",
+            SEPARATOR: "\x1b[37m",
         },
 
-        LOG_BASE_DIR: path.join(process.cwd(), 'logs'),
+        LOG_BASE_DIR: path.join(process.cwd(), "logs"),
 
-        CURRENT_LEVEL: process.env.LOG_LEVEL || 'INFO',
+        CURRENT_LEVEL: process.env.LOG_LEVEL || "INFO",
 
         CONSOLE_OUTPUT:
-            process.env.ENABLE_CONSOLE_LOGS === 'true' ||
-            process.env.NODE_ENV !== 'production' ||
-            process.env.DOCKER_CONTAINER === 'true',
+            process.env.ENABLE_CONSOLE_LOGS === "true" ||
+            process.env.NODE_ENV !== "production" ||
+            process.env.DOCKER_CONTAINER === "true",
 
         EXCLUDED_URLS: [
-            ...(process.env.LOG_EXCLUDE_HEALTH === 'true' ? ['/health'] : []),
-            ...(process.env.LOG_EXCLUDE_URLS ? process.env.LOG_EXCLUDE_URLS.split(',') : []),
+            ...(process.env.LOG_EXCLUDE_HEALTH === "true" ? ["/health"] : []),
+            ...(process.env.LOG_EXCLUDE_URLS
+                ? process.env.LOG_EXCLUDE_URLS.split(",")
+                : []),
         ],
 
+        MAX_SAFESTR_LENGTH: process.env.LOG_MAX_SAFESTR_LENGTH
+            ? parseInt(process.env.LOG_MAX_SAFESTR_LENGTH, 10)
+            : Infinity,
+
         DATE_OPTIONS: {
-            timeZone: 'Asia/Manila',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
+            timeZone: "Asia/Manila",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
             hour12: false,
         },
     };
@@ -73,7 +79,10 @@ class Logger {
     // ========================================
 
     constructor() {
-        this.currentLevel = Logger.CONFIG.LEVELS[Logger.CONFIG.CURRENT_LEVEL.toUpperCase()] ?? Logger.CONFIG.LEVELS.INFO;
+        this.currentLevel =
+            Logger.CONFIG.LEVELS[Logger.CONFIG.CURRENT_LEVEL.toUpperCase()] ??
+            Logger.CONFIG.LEVELS.INFO;
+        this._maxSafeStrLength = Logger.CONFIG.MAX_SAFESTR_LENGTH;
         this.writeQueue = [];
         this.isWriting = false;
         this.machineIdentifier = this.#computeMachineIdentifier();
@@ -91,24 +100,24 @@ class Logger {
         try {
             const hostname = os.hostname();
             const interfaces = os.networkInterfaces();
-            let ipAddress = 'unknown';
+            let ipAddress = "unknown";
 
             for (const entries of Object.values(interfaces)) {
                 if (!entries) continue;
                 for (const net of entries) {
-                    const family = net.family || net.addressFamily || '';
-                    const isIPv4 = family === 'IPv4' || family === 4;
+                    const family = net.family || net.addressFamily || "";
+                    const isIPv4 = family === "IPv4" || family === 4;
                     if (isIPv4 && !net.internal) {
                         ipAddress = net.address || ipAddress;
                         break;
                     }
                 }
-                if (ipAddress !== 'unknown') break;
+                if (ipAddress !== "unknown") break;
             }
 
             return `${hostname} (S) ${ipAddress}`;
         } catch {
-            return 'unknown (S) unknown';
+            return "unknown (S) unknown";
         }
     }
 
@@ -117,8 +126,15 @@ class Logger {
      */
     #getDateComponents() {
         const now = new Date();
-        const formatter = new Intl.DateTimeFormat('en-CA', Logger.CONFIG.DATE_OPTIONS);
-        const partsMap = Object.fromEntries(formatter.formatToParts(now).map(({ type, value }) => [type, value]));
+        const formatter = new Intl.DateTimeFormat(
+            "en-CA",
+            Logger.CONFIG.DATE_OPTIONS,
+        );
+        const partsMap = Object.fromEntries(
+            formatter
+                .formatToParts(now)
+                .map(({ type, value }) => [type, value]),
+        );
 
         return {
             year: partsMap.year,
@@ -133,34 +149,35 @@ class Logger {
      */
     #shortenPath(fullPath) {
         try {
-            const cwd = process.cwd().replace(/\\/g, '/');
-            const norm = String(fullPath || '').replace(/\\/g, '/');
-            const srcIdx = norm.lastIndexOf('/src/');
+            const cwd = process.cwd().replace(/\\/g, "/");
+            const norm = String(fullPath || "").replace(/\\/g, "/");
+            const srcIdx = norm.lastIndexOf("/src/");
 
             if (srcIdx !== -1) return norm.substring(srcIdx + 1);
             if (norm.startsWith(cwd)) {
                 const rel = norm.substring(cwd.length);
-                return rel.startsWith('/') ? rel.substring(1) : rel;
+                return rel.startsWith("/") ? rel.substring(1) : rel;
             }
 
-            const parts = norm.split('/');
-            return parts.slice(Math.max(0, parts.length - 2)).join('/');
+            const parts = norm.split("/");
+            return parts.slice(Math.max(0, parts.length - 2)).join("/");
         } catch {
-            return String(fullPath || '');
+            return String(fullPath || "");
         }
     }
 
     /**
      * Safely serialize any value to string, handling objects, arrays, and primitives
      */
-    #safeStringify(value, maxLength = 1000) {
+    #safeStringify(value, maxLength = this._maxSafeStrLength) {
         try {
-            if (value === null) return 'null';
-            if (value === undefined) return 'undefined';
-            if (typeof value === 'string') return value;
-            if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+            if (value === null) return "null";
+            if (value === undefined) return "undefined";
+            if (typeof value === "string") return value;
+            if (typeof value === "number" || typeof value === "boolean")
+                return String(value);
 
-            if (typeof value === 'object') {
+            if (typeof value === "object") {
                 let jsonStr;
                 try {
                     jsonStr = JSON.stringify(value);
@@ -168,17 +185,20 @@ class Logger {
                     try {
                         const seen = new WeakSet();
                         jsonStr = JSON.stringify(value, (key, val) => {
-                            if (typeof val === 'object' && val !== null) {
-                                if (seen.has(val)) return '[Circular Reference]';
+                            if (typeof val === "object" && val !== null) {
+                                if (seen.has(val))
+                                    return "[Circular Reference]";
                                 seen.add(val);
                             }
                             return val;
                         });
                     } catch {
-                        return '[Complex Object - Unable to Stringify]';
+                        return "[Complex Object - Unable to Stringify]";
                     }
                 }
-                return jsonStr.length > maxLength ? jsonStr.substring(0, maxLength - 3) + '...' : jsonStr;
+                return jsonStr.length > maxLength
+                    ? jsonStr.substring(0, maxLength - 3) + "..."
+                    : jsonStr;
             }
 
             return String(value);
@@ -194,8 +214,12 @@ class Logger {
         try {
             await fs.mkdir(dirPath, { recursive: true });
         } catch (error) {
-            if (error.code !== 'EEXIST') {
-                console.error('Failed to create log directory:', dirPath, error.message);
+            if (error.code !== "EEXIST") {
+                console.error(
+                    "Failed to create log directory:",
+                    dirPath,
+                    error.message,
+                );
                 throw error;
             }
         }
@@ -208,7 +232,7 @@ class Logger {
         try {
             return (await fs.stat(filePath)).size;
         } catch (error) {
-            if (error.code === 'ENOENT') return 0;
+            if (error.code === "ENOENT") return 0;
             throw error;
         }
     }
@@ -217,27 +241,38 @@ class Logger {
      * Capture call site information (function, file, line) from stack trace
      */
     #captureCallSite(meta = {}) {
-        let displayFn = meta.function || 'anonymous';
-        let displayFile = meta.file ? this.#shortenPath(meta.file) : '';
-        let displayLine = meta.line ? `:${meta.line}` : '';
+        let displayFn = meta.function || "anonymous";
+        let displayFile = meta.file ? this.#shortenPath(meta.file) : "";
+        let displayLine = meta.line ? `:${meta.line}` : "";
 
         if (!meta.function || !meta.file || !meta.line) {
             try {
-                const enabled = String(process.env.LOG_CALLSITE || 'true').toLowerCase() === 'true';
+                const enabled =
+                    String(process.env.LOG_CALLSITE || "true").toLowerCase() ===
+                    "true";
                 if (enabled) {
-                    const stack = (new Error().stack || '').split('\n');
-                    const chosenFrame = stack.slice(2).find((line) => line.trim() && !line.includes('logger.js'));
+                    const stack = (new Error().stack || "").split("\n");
+                    const chosenFrame = stack
+                        .slice(2)
+                        .find(
+                            (line) =>
+                                line.trim() && !line.includes("logger.js"),
+                        );
 
                     if (chosenFrame) {
-                        const m1 = chosenFrame.trim().match(/^at\s+(.+?)\s+\((.+):(\d+):(\d+)\)$/);
-                        const m2 = chosenFrame.trim().match(/^at\s+(.+):(\d+):(\d+)$/);
+                        const m1 = chosenFrame
+                            .trim()
+                            .match(/^at\s+(.+?)\s+\((.+):(\d+):(\d+)\)$/);
+                        const m2 = chosenFrame
+                            .trim()
+                            .match(/^at\s+(.+):(\d+):(\d+)$/);
 
                         if (m1) {
                             displayFn = m1[1];
                             displayFile = this.#shortenPath(m1[2]);
                             displayLine = `:${m1[3]}`;
                         } else if (m2) {
-                            displayFn = 'anonymous';
+                            displayFn = "anonymous";
                             displayFile = this.#shortenPath(m2[1]);
                             displayLine = `:${m2[2]}`;
                         }
@@ -265,7 +300,10 @@ class Logger {
         for (let counter = 1; counter < 1000; counter++) {
             filename = `${baseName}_${counter}.log`;
             fullPath = path.join(baseDir, filename);
-            if ((await this.#getFileSize(fullPath)) < Logger.CONFIG.MAX_FILE_SIZE) {
+            if (
+                (await this.#getFileSize(fullPath)) <
+                Logger.CONFIG.MAX_FILE_SIZE
+            ) {
                 return { filename, fullPath };
             }
         }
@@ -290,7 +328,7 @@ class Logger {
         try {
             await this.#ensureDirectoryExists(Logger.CONFIG.LOG_BASE_DIR);
         } catch (error) {
-            console.error('Failed to initialize log directory:', error.message);
+            console.error("Failed to initialize log directory:", error.message);
         }
     }
 
@@ -300,15 +338,18 @@ class Logger {
     #formatMessage(level, message, meta = {}) {
         const { timestamp } = this.#getDateComponents();
         const cleanMessage = this.#resolveMessage(message);
-        const { displayFn, displayFile, displayLine } = this.#captureCallSite(meta);
+        const { displayFn, displayFile, displayLine } =
+            this.#captureCallSite(meta);
         const isHttpRequest = meta._isHttpRequest;
-        const method = isHttpRequest ? meta.method || 'UNKNOWN' : 'FUNC';
+        const method = isHttpRequest ? meta.method || "UNKNOWN" : "FUNC";
         const machineId = meta._clientMachine || this.machineIdentifier;
 
         let entry = `[${machineId}] [${timestamp}] [${level}] [PID:${process.pid}] [${displayFn} @ ${displayFile}${displayLine}]`;
 
-        if (isHttpRequest && meta._requestPhase) entry += ` ${meta._requestPhase}`;
-        if (!(isHttpRequest && cleanMessage.includes(`[${meta.method} @`))) entry += ` [${method}]`;
+        if (isHttpRequest && meta._requestPhase)
+            entry += ` ${meta._requestPhase}`;
+        if (!(isHttpRequest && cleanMessage.includes(`[${meta.method} @`)))
+            entry += ` [${method}]`;
         entry += ` - ${cleanMessage}`;
 
         const metaStr = this.#buildMetaString(meta);
@@ -324,13 +365,14 @@ class Logger {
         const colors = Logger.CONFIG.COLORS;
         const { timestamp } = this.#getDateComponents();
         const cleanMessage = this.#resolveMessage(message);
-        const { displayFn, displayFile, displayLine } = this.#captureCallSite(meta);
+        const { displayFn, displayFile, displayLine } =
+            this.#captureCallSite(meta);
         const isHttpRequest = meta._isHttpRequest;
-        const method = isHttpRequest ? meta.method || 'UNKNOWN' : 'FUNC';
+        const method = isHttpRequest ? meta.method || "UNKNOWN" : "FUNC";
         const machineId = meta._clientMachine || this.machineIdentifier;
-        const levelColor = colors[level] || '';
+        const levelColor = colors[level] || "";
 
-        let entry = '';
+        let entry = "";
         entry += `${colors.BRACKET}[${colors.MACHINE_ID}${machineId}${colors.BRACKET}]${colors.RESET}`;
         entry += ` ${colors.BRACKET}[${colors.TIMESTAMP}${timestamp}${colors.BRACKET}]${colors.RESET}`;
         entry += ` ${colors.BRACKET}[${levelColor}${level}${colors.BRACKET}]${colors.RESET}`;
@@ -359,20 +401,28 @@ class Logger {
      * Resolve a raw message value to a clean string
      */
     #resolveMessage(message) {
-        if (message === null || message === undefined) return '[Empty Message]';
-        return this.#safeStringify(message).trim() || '[Empty Message]';
+        if (message === null || message === undefined) return "[Empty Message]";
+        return this.#safeStringify(message).trim() || "[Empty Message]";
     }
 
     /**
      * Serialize non-internal meta keys to a string
      */
     #buildMetaString(meta) {
-        const INTERNAL_KEYS = new Set(['method', 'url', 'function', 'file', 'line']);
-        const metaKeys = Object.keys(meta).filter((k) => !k.startsWith('_') && !INTERNAL_KEYS.has(k));
+        const INTERNAL_KEYS = new Set([
+            "method",
+            "url",
+            "function",
+            "file",
+            "line",
+        ]);
+        const metaKeys = Object.keys(meta).filter(
+            (k) => !k.startsWith("_") && !INTERNAL_KEYS.has(k),
+        );
         if (metaKeys.length === 0) return null;
 
         const metaObj = Object.fromEntries(metaKeys.map((k) => [k, meta[k]]));
-        return this.#safeStringify(metaObj, 5000);
+        return this.#safeStringify(metaObj);
     }
 
     /**
@@ -380,18 +430,27 @@ class Logger {
      */
     #injectCallSite(meta) {
         try {
-            const enabled = String(process.env.LOG_CALLSITE || 'true').toLowerCase() === 'true';
+            const enabled =
+                String(process.env.LOG_CALLSITE || "true").toLowerCase() ===
+                "true";
             if (!enabled) return;
 
-            const stack = (new Error().stack || '').split('\n');
+            const stack = (new Error().stack || "").split("\n");
             const chosenFrame = stack.slice(2).find((line) => {
                 const t = line.trim();
-                return t && !t.includes('utils/logger.js') && !t.includes('\\utils\\logger.js') && !t.includes('/utils/logger.js');
+                return (
+                    t &&
+                    !t.includes("utils/logger.js") &&
+                    !t.includes("\\utils\\logger.js") &&
+                    !t.includes("/utils/logger.js")
+                );
             });
 
             if (!chosenFrame) return;
 
-            const m1 = chosenFrame.trim().match(/^at\s+(.+?)\s+\((.+):(\d+):(\d+)\)$/);
+            const m1 = chosenFrame
+                .trim()
+                .match(/^at\s+(.+?)\s+\((.+):(\d+):(\d+)\)$/);
             const m2 = chosenFrame.trim().match(/^at\s+(.+):(\d+):(\d+)$/);
 
             if (m1) {
@@ -399,7 +458,7 @@ class Logger {
                 if (!meta.file) meta.file = m1[2];
                 if (!meta.line) meta.line = m1[3];
             } else if (m2) {
-                if (!meta.function) meta.function = 'anonymous';
+                if (!meta.function) meta.function = "anonymous";
                 if (!meta.file) meta.file = m2[1];
                 if (!meta.line) meta.line = m2[2];
             }
@@ -419,14 +478,17 @@ class Logger {
         const logDir = this.#getLogDirectory();
         try {
             await this.#ensureDirectoryExists(logDir);
-            const { fullPath } = await this.#getAvailableFilename(logDir, level.toLowerCase());
+            const { fullPath } = await this.#getAvailableFilename(
+                logDir,
+                level.toLowerCase(),
+            );
             const formattedMessage = this.#formatMessage(level, message, meta);
 
             if (Logger.CONFIG.CONSOLE_OUTPUT) {
                 console.log(this.#formatColorizedMessage(level, message, meta));
             }
 
-            await fs.appendFile(fullPath, formattedMessage + '\n', 'utf8');
+            await fs.appendFile(fullPath, formattedMessage + "\n", "utf8");
         } catch (error) {
             console.error(`Failed to write ${level} log:`, error.message);
         }
@@ -444,7 +506,7 @@ class Logger {
             try {
                 await this.#writeToFile(level, message, meta);
             } catch (error) {
-                console.error('Error processing write queue:', error.message);
+                console.error("Error processing write queue:", error.message);
             }
         }
         this.isWriting = false;
@@ -455,7 +517,7 @@ class Logger {
     // ========================================
 
     #normalizeLogArguments(args) {
-        if (args.length === 0) return { message: '[Empty Log]', meta: {} };
+        if (args.length === 0) return { message: "[Empty Log]", meta: {} };
         if (args.length === 1) return { message: args[0], meta: {} };
 
         const [message, ...rest] = args;
@@ -466,23 +528,31 @@ class Logger {
 
         const formattedArgs = rest.map((a) => this.#formatMetaValue(a, true));
         return {
-            message: `${message} ${formattedArgs.join(' ')}`,
+            message: `${message} ${formattedArgs.join(" ")}`,
             meta: { additionalData: rest.map((a) => this.#formatMetaValue(a)) },
         };
     }
 
     #isPlainMetaObject(value) {
-        if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return false;
+        if (
+            value === null ||
+            value === undefined ||
+            typeof value !== "object" ||
+            Array.isArray(value)
+        )
+            return false;
         const keys = Object.keys(value);
         return keys.length === 0 || !keys.every((key, i) => key === String(i));
     }
 
     #formatMetaValue(value, forMessage = false) {
-        if (value === null) return 'null';
-        if (value === undefined) return 'undefined';
-        if (typeof value === 'string') return value;
-        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-        if (Array.isArray(value) || typeof value === 'object') return forMessage ? JSON.stringify(value) : value;
+        if (value === null) return "null";
+        if (value === undefined) return "undefined";
+        if (typeof value === "string") return value;
+        if (typeof value === "number" || typeof value === "boolean")
+            return String(value);
+        if (Array.isArray(value) || typeof value === "object")
+            return forMessage ? JSON.stringify(value) : value;
         return String(value);
     }
 
@@ -495,7 +565,8 @@ class Logger {
      */
     async log(level, message, meta = {}) {
         if (Logger.CONFIG.LEVELS[level] > this.currentLevel) return;
-        if (!message || (typeof message === 'string' && !message.trim())) return;
+        if (!message || (typeof message === "string" && !message.trim()))
+            return;
 
         this.#injectCallSite(meta);
         this.writeQueue.push({ level, message, meta });
@@ -504,22 +575,22 @@ class Logger {
 
     error(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
-        return this.log('ERROR', message, meta);
+        return this.log("ERROR", message, meta);
     }
 
     warn(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
-        return this.log('WARN', message, meta);
+        return this.log("WARN", message, meta);
     }
 
     info(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
-        return this.log('INFO', message, meta);
+        return this.log("INFO", message, meta);
     }
 
     debug(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
-        return this.log('DEBUG', message, meta);
+        return this.log("DEBUG", message, meta);
     }
 
     // ========================================
@@ -527,56 +598,63 @@ class Logger {
     // ========================================
 
     logIncomingRequest(req, customMessage = null) {
-        return this.log('INFO', customMessage || 'Incoming Request', {
+        return this.log("INFO", customMessage || "Incoming Request", {
             method: req.method,
             url: req.originalUrl || req.url,
             _isHttpRequest: true,
-            _requestPhase: '[Incoming Request]',
+            _requestPhase: "[Incoming Request]",
             _clientMachine: this.#createClientMachineIdentifier(req),
         });
     }
 
     logHandlingRequest(req, additionalMeta = {}) {
-        return this.log('INFO', 'Handling Request', {
+        return this.log("INFO", "Handling Request", {
             method: req.method,
             url: req.originalUrl || req.url,
             _isHttpRequest: true,
-            _requestPhase: '[Handling Request]',
+            _requestPhase: "[Handling Request]",
             _clientMachine: this.#createClientMachineIdentifier(req),
             ...additionalMeta,
         });
     }
 
     logCompletedRequest(req, res, duration, customMessage = null) {
-        const level = res.statusCode >= 400 ? 'ERROR' : 'INFO';
-        return this.log(level, customMessage || 'Request Complete', {
+        const level = res.statusCode >= 400 ? "ERROR" : "INFO";
+        return this.log(level, customMessage || "Request Complete", {
             method: req.method,
             url: req.originalUrl || req.url,
             _isHttpRequest: true,
-            _requestPhase: '[Request Complete]',
+            _requestPhase: "[Request Complete]",
             _clientMachine: this.#createClientMachineIdentifier(req),
         });
     }
 
     #createClientMachineIdentifier(req) {
         const username =
-            req.get?.('X-Client-Username') ||
-            (req.query?.username && req.query?.userId ? `${req.query.username}@${req.query.userId}` : null) ||
-            'anonymous@unknown';
+            req.get?.("X-Client-Username") ||
+            (req.query?.username && req.query?.userId
+                ? `${req.query.username}@${req.query.userId}`
+                : null) ||
+            "anonymous@unknown";
         return `${username} (C) ${this.#getClientIp(req)}`;
     }
 
     #getClientIp(req) {
         const headers = req.headers || {};
-        const xff = headers['x-forwarded-for'];
-        const xri = headers['x-real-ip'];
-        const cfi = headers['cf-connecting-ip'];
+        const xff = headers["x-forwarded-for"];
+        const xri = headers["x-real-ip"];
+        const cfi = headers["cf-connecting-ip"];
 
-        if (xff && typeof xff === 'string') return xff.split(',')[0].trim();
-        if (xri && typeof xri === 'string') return xri.trim();
-        if (cfi && typeof cfi === 'string') return cfi.trim();
+        if (xff && typeof xff === "string") return xff.split(",")[0].trim();
+        if (xri && typeof xri === "string") return xri.trim();
+        if (cfi && typeof cfi === "string") return cfi.trim();
 
-        return req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+        return (
+            req.ip ||
+            req.connection?.remoteAddress ||
+            req.socket?.remoteAddress ||
+            "unknown"
+        );
     }
 
     // ========================================
@@ -584,7 +662,7 @@ class Logger {
     // ========================================
 
     cache(operation, key, result, duration = null) {
-        return this.log('DEBUG', 'Cache Operation', {
+        return this.log("DEBUG", "Cache Operation", {
             operation,
             key,
             result,
@@ -593,7 +671,7 @@ class Logger {
     }
 
     database(operation, table, duration = null, rowCount = null) {
-        return this.log('DEBUG', 'Database Operation', {
+        return this.log("DEBUG", "Database Operation", {
             operation,
             table,
             ...(duration != null && { duration: `${duration}ms` }),
@@ -602,12 +680,20 @@ class Logger {
     }
 
     performance(operation, duration, details = {}) {
-        const level = duration > 5000 ? 'WARN' : 'INFO';
-        return this.log(level, 'Performance', { operation, duration: `${duration}ms`, ...details });
+        const level = duration > 5000 ? "WARN" : "INFO";
+        return this.log(level, "Performance", {
+            operation,
+            duration: `${duration}ms`,
+            ...details,
+        });
     }
 
     security(event, details = {}) {
-        return this.log('WARN', 'Security Event', { event, timestamp: new Date().toISOString(), ...details });
+        return this.log("WARN", "Security Event", {
+            event,
+            timestamp: new Date().toISOString(),
+            ...details,
+        });
     }
 
     // ========================================
@@ -621,7 +707,7 @@ class Logger {
 
             const fileStats = await Promise.all(
                 files
-                    .filter((f) => f.endsWith('.log'))
+                    .filter((f) => f.endsWith(".log"))
                     .map(async (file) => {
                         const stats = await fs.stat(path.join(logDir, file));
                         return {
@@ -631,10 +717,14 @@ class Logger {
                             created: stats.birthtime,
                             modified: stats.mtime,
                         };
-                    })
+                    }),
             );
 
-            return { directory: logDir, totalFiles: fileStats.length, files: fileStats };
+            return {
+                directory: logDir,
+                totalFiles: fileStats.length,
+                files: fileStats,
+            };
         } catch (error) {
             return { error: error.message, directory: this.#getLogDirectory() };
         }
@@ -644,16 +734,16 @@ class Logger {
         try {
             const cutoffDate = new Date();
             cutoffDate.setDate(cutoffDate.getDate() - daysToKeep);
-            this.info('Log cleanup completed', { daysToKeep, cutoffDate });
+            this.info("Log cleanup completed", { daysToKeep, cutoffDate });
         } catch (error) {
-            this.error('Log cleanup failed', { error: error.message });
+            this.error("Log cleanup failed", { error: error.message });
         }
     }
 
     #formatBytes(bytes, decimals = 2) {
-        if (bytes === 0) return '0 Bytes';
+        if (bytes === 0) return "0 Bytes";
         const k = 1024;
-        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals < 0 ? 0 : decimals))} ${sizes[i]}`;
     }

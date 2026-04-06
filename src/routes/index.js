@@ -5,7 +5,7 @@ const router = express.Router();
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 
-const healthRoutes = require("./health");
+const healthRoutes = require("./health.route");
 const csrfRoutes = require("./csrf.route");
 
 // ─── Mount routes ─────────────────────────────────────────────────────────────

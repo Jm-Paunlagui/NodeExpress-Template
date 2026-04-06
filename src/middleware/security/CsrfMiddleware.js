@@ -1,64 +1,18 @@
-/**
- * @fileoverview CSRF (Cross-Site Request Forgery) Protection Middleware
- * @description Comprehensive CSRF protection system for backend API using csrf-csrf library
- * @author Jm-Paunlagui
- * @version 3.0.0
- * @updated March 2026
- *
- * This module provides robust CSRF protection using the Double Submit Cookie pattern
- * via the csrf-csrf library, encapsulated in a class for clean lifecycle management
- * and testability.
- *
- * Security Features:
- * - Double Submit Cookie pattern (industry standard)
- * - HTTP-only cookies prevent XSS attacks from stealing secrets
- * - Secure flag ensures cookies only sent over HTTPS
- * - SameSite=Strict prevents cross-site cookie sending
- * - Cryptographically secure token generation
- * - Forced token rotation on refresh via { overwrite: true }
- * - Multiple token source support (headers, body)
- *
- * Environment Variables:
- * - CSRF_SECRET : Secret key for CSRF token generation (required in production)
- * - NODE_ENV    : Environment mode (affects cookie security settings)
- * - USE_HTTPS   : Set to 'true' in production to enable __Host- cookie prefix and Secure flag
- *
- * @requires csrf-csrf
- * @requires ../../utils/logger
- */
-
 "use strict";
+
+/**
+ * @fileoverview CSRF protection middleware using double-submit cookie pattern.
+ * Uses csrf-csrf library with HTTP-only cookies,
+ * forced token rotation, and multiple token sources.
+ */
 
 const { doubleCsrf } = require("csrf-csrf");
 const { logger } = require("../../utils/logger");
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+const TOKEN_TTL_MS = 5 * 60 * 1000;
+const TOKEN_SIZE = 64;
 
-const TOKEN_TTL_MS = 5 * 60 * 1000; // 5 mins
-const TOKEN_SIZE = 64; // bytes — larger = more secure
-
-// ---------------------------------------------------------------------------
-// CsrfProtection class
-// ---------------------------------------------------------------------------
-
-/**
- * Encapsulates all CSRF protection logic for a single Express application.
- *
- * Usage:
- *   const csrf = new CsrfProtection();
- *   router.get('/token',   csrf.tokenHandler);
- *   router.post('/refresh', csrf.refreshHandler);
- *   router.get('/status',  csrf.statusHandler);
- *   router.use(csrf.protect);          // validate on state-changing routes
- */
-class CsrfProtection {
-    /**
-     * @param {object} [options]
-     * @param {string} [options.secret]           - Override CSRF_SECRET env var (useful in tests)
-     * @param {boolean} [options.forceSecure]     - Override the HTTPS / secure-cookie detection
-     */
+class CsrfMiddleware {
     constructor(options = {}) {
         this._isSecure =
             options.forceSecure ??
@@ -95,7 +49,7 @@ class CsrfProtection {
         this.tokenHandler = this._tokenHandler.bind(this);
         this.refreshHandler = this._refreshHandler.bind(this);
         this.statusHandler = this._statusHandler.bind(this);
-        this.protect = this._protect.bind(this);
+        this.handle = this._protect.bind(this);
     }
 
     get _cookieName() {
@@ -308,17 +262,5 @@ class CsrfProtection {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Singleton export
-// ---------------------------------------------------------------------------
-const defaultInstance = new CsrfProtection();
-
-module.exports = {
-    csrfProtect: defaultInstance.protect,
-    csrfTokenHandler: defaultInstance.tokenHandler,
-    csrfRefreshHandler: defaultInstance.refreshHandler,
-    csrfStatusHandler: defaultInstance.statusHandler,
-    generateCsrfToken: defaultInstance.generateToken,
-    doubleCsrfProtection: defaultInstance.doubleCsrfProtection,
-    CsrfProtection,
-};
+const defaultCsrf = new CsrfMiddleware();
+module.exports = { CsrfMiddleware, defaultCsrf };

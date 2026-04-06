@@ -1,132 +1,484 @@
-# Project: Project Template for Node.js Express API
-This project template provides a basic structure for building a Node.js Express API. It includes essential middleware for security, performance, and request parsing. The template is designed to be easily extendable, allowing you to add routes, controllers, and other features as needed.
+# Project: MEAL Backend — Node.js Express API Template
+
+This template provides a production-grade structure for building Node.js Express APIs.
+It is designed around **Class-based (OOP) architecture**, clean separation of concerns,
+and is intended to be maintainable from the perspective of any developer who picks it up.
+
+---
 
 ## Features
-- Express.js for building the API
+
+- Express.js (v5) for building the API
 - Helmet for securing HTTP headers
-- CSRF protection for preventing cross-site request forgery attacks
-- CORS for enabling cross-origin requests
-- Compression for improving performance
-- Cookie-parser for parsing cookies
-- Body-parser for parsing JSON and URL-encoded request bodies
-- Basic error handling middleware
-- Standard response format for API responses 
-- Standard error response format for API errors
-- Supports Oracle Database connection using oracledb
-- Environment variable management with dotenv
-- Prevent Redirects for API routes to enhance security
-- Captures user and request tracing information in logs for better debugging and monitoring
-- Captures and logs all errors with stack traces for easier debugging and monitoring
-- Captures Incoming request details (method, URL, headers, body) in logs for better debugging and monitoring
-- Captures Outgoing response details (status code, headers, body) in logs for better debugging and monitoring
-- Sliding Window Counter rate limiting to protect against abuse and DDoS attacks
-- IP filtering middleware to restrict access to trusted IP addresses or ranges
-- Graceful shutdown handling to ensure proper cleanup of resources on server shutdown
-- OracleDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities (in `src/utils/oracle-mongo-wrapper/`)
-- PKG for compiling the Node.js application into a standalone executable (optional, can be set up later)
+- CSRF protection (double-submit cookie via `csrf-csrf`)
+- CORS with advanced network-aware pattern matching
+- Compression middleware (gzip)
+- Cookie-parser for signed cookie support
+- Body-parser for JSON and URL-encoded payloads
+- JWT-based authentication with dynamic, permission-based authorization
+- Sliding Window Counter rate limiting (in-memory, no Redis)
+- IP filtering middleware (CIDR-aware)
+- Security filter (blocks scanners, path traversal, script injection)
+- Standardized API response shape (`sendSuccess` / `sendError`)
+- Structured AppError class with operational error handling
+- Global error handler — all errors funnel through one place
+- Winston-style custom logger with daily file rotation, microsecond precision, and no truncation
+- Request traceability (unique `X-Request-Id` per request via `nanoid`)
+- Response time tracking with slow-response detection
+- Graceful shutdown with pool cleanup
+- OracleDB dual-pool pattern with PoolHealthMonitor and exponential backoff retry
+- Console manager (ASCII art, daily clearing, process title for PKG)
+- Encoding polyfills for PKG-compiled executables
+- Clustering support (master/worker, configurable via env)
+- OracleDB wrapper library that mimics MongoDB's API (`src/utils/oracle-mongo-wrapper/`)
+- PKG-compatible for compiling into a standalone `.exe`
+
+---
 
 ## Project Structure
+
+```
 express-template/
-├── server.js                        # Entry point – HTTP/HTTPS, graceful shutdown
+├── server.js                          # Entry point — HTTP/HTTPS, clustering, graceful shutdown
 ├── package.json
-├── .env.example                     # All env vars documented with safe defaults
-├── certs/                           # Drop server.key + server.crt here for HTTPS
-├── logs/                            # Auto-created rotating log files land here
+├── .env.example                       # All env vars documented with safe defaults
+├── certs/                             # Drop server.key + server.crt here for HTTPS
+├── logs/                              # Auto-created rotating log files (YYYY/MM/DD/level.log)
 │
 └── src/
-    ├── app.js                       # Express app (middleware chain, routes)
+    ├── app.js                         # Express app — middleware chain + routes
     │
     ├── config/
-    │   ├── index.js                 # Central config object (validates prod secrets)
-    │   ├── database.js              # DB manager with retry logic + adapter pattern
+    │   ├── index.js                   # Adapter factory — exports active DB adapter
+    │   ├── database.js                # Connection registry (named pools, credentials)
     │   └── adapters/
-    │       ├── mysql.js             # MySQL (mysql2) later setup, priority is OracleDB  
-    │       └── oracle.js            # OracleDB (oracledb)
-    |
+    │       ├── oracle.js              # OracleDB adapter (pools, health monitor, retry)
+    │       └── mysql.js               # MySQL adapter (future)
+    │
     ├── constants/
-    │   ├── index.js                 # App-wide constants (e.g. HTTP status codes)
+    │   ├── index.js                   # Re-exports HTTP_STATUS + all sub-modules
     │   ├── errors/
-    │   │   └── index.js             # App-wide error messages + codes + types + stack traces
-    │   └── responses/
-    │       └── index.js             # App-wide response messages + codes + types + stack traces
-    │   
+    │   │   └── index.js               # AppError class + static error message strings
+    │   ├── responses/
+    │   │   └── index.js               # sendSuccess / sendError helpers + response strings
+    │   └── messages/
+    │       ├── index.js               # Re-exports all message namespaces
+    │       ├── oracle.messages.js     # Oracle pool / driver log messages
+    │       ├── oracleWrapper.messages.js  # Oracle-Mongo-Wrapper validation messages
+    │       ├── auth.messages.js       # Authentication / authorization messages
+    │       ├── middleware.messages.js # Security filter, rate limit, IP filter messages
+    │       └── database.messages.js  # General DB operation messages
+    │
     ├── middleware/
     │   ├── security/
-    │   │   ├── csrf.js                 # Double-submit cookie CSRF (replaces csurf)
-    │   │   ├── cors.js                 # CORS configuration middleware
-    │   │   ├── helmet.js               # Helmet configuration for secure HTTP headers
-    │   │   ├── filterIPs.js            # Middleware to filter requests based on IP address
-    |   |   |-- rateLimiter.js          # Sliding Window Counter rate limiting middleware
-    |   |   |-- traceability.js         # To add user and request tracing information to logs for better debugging and monitoring
-    │   │   └── preventRedirects.js     # Prevents automatic redirections for API security
-    |   |
+    │   │   ├── CsrfMiddleware.js      # Class: double-submit cookie CSRF
+    │   │   ├── CorsMiddleware.js      # Class: network-aware CORS
+    │   │   ├── HelmetMiddleware.js    # Class: HTTP security headers
+    │   │   ├── IpFilterMiddleware.js  # Class: CIDR-aware IP allowlist
+    │   │   ├── RateLimiterMiddleware.js  # Class: Sliding Window Counter
+    │   │   ├── SecurityFilterMiddleware.js  # Class: scanner/traversal blocking
+    │   │   └── PreventRedirectsMiddleware.js # Class: prevent API redirects
+    │   │
     │   ├── performance/
-    │   │   ├── compression.js          # Compression middleware (gzip)
-    |   |   └── cache.js                # Caching middleware (e.g. Node-cache or Redis [Preferably node-cache for simplicity])
-    |   |
+    │   │   ├── CompressionMiddleware.js  # Class: gzip compression
+    │   │   └── ResponseTimeMiddleware.js  # Class: X-Response-Time header + metrics
+    │   │
     │   ├── parsing/
-    │   │   ├── bodyParser.js          # Body parsing middleware (JSON + URL-encoded)
-    │   │   └── cookieParser.js        # Cookie parsing middleware
-    |   |
-    │   |-- authentication/
-    │   │   └── auth.js                # Placeholder for authentication middleware (e.g. JWT)
-    |   |
+    │   │   ├── BodyParserMiddleware.js    # Class: JSON + URL-encoded parsing
+    │   │   └── CookieParserMiddleware.js  # Class: cookie parsing
+    │   │
+    │   ├── authentication/
+    │   │   └── AuthMiddleware.js      # Class: JWT auth + dynamic permission-based access
+    │   │
+    │   ├── traceability/
+    │   │   └── TraceabilityMiddleware.js  # Class: request ID injection + structured logging
+    │   │
     │   └── errorHandling/
-    │       └── errorHandler.js        # Centralized error handling middleware and where all errors funnel through
+    │       └── ErrorHandlerMiddleware.js  # Class: global error handler + 404 + body capture
     │
     ├── routes/
-    │   ├── index.js                 # Route aggregator
-    │   └── health.js                # GET /api/health (liveness + DB ping)
+    │   ├── index.js                   # Route aggregator
+    │   ├── health.route.js            # GET /api/v1/health
+    │   └── csrf.route.js              # GET /api/v1/csrf/token etc.
     │
-    ├── controllers/                 # One controller per resource
-    ├── models/                      # DB models / schemas
-    ├── services/                    # Business logic (keeps controllers thin)
+    ├── controllers/                   # One class per resource, thin HTTP layer
+    ├── models/                        # DB schemas / query definitions
+    ├── services/                      # Business logic classes
     └── utils/
-        ├── logger.js                # Winston – daily rotating files + console
-        └── oracle-mongo-wrapper/  # Wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities
-            
-## Architecture Rules
- 
-### Controllers
-- Only handle `req`/`res`/`next` — no DB calls, no business logic
-- Always delegate to a service, then return a formatted response
-- Wrap in `catchAsync` to avoid try/catch boilerplate
- 
-```js
-export const getUser = catchAsync(async (req, res) => {
-  const user = await userService.getById(req.params.id);
-  res.json(sendSuccess('User fetched', user));
-});
+        ├── logger.js                  # Custom logger (daily rotation, no truncation)
+        ├── catchAsync.js              # Async error wrapper for controllers
+        ├── encodingPolyfill.js        # PKG encoding polyfills (must load first)
+        ├── consoleManager.js          # Class: ASCII art, process title, daily clear
+        ├── nanoidLoader.js            # Nanoid with fallback chain for PKG
+        └── oracle-mongo-wrapper/      # MongoDB-style Oracle query library
 ```
- 
-### Services
-- All business logic lives here
-- Interact with models/DB directly
-- Throw `AppError` on failure — never send HTTP responses from here
- 
-### Models
-- DB schemas only (OracleDB or MySQL — check `src/models/`)
-- No business logic in models
- 
+
 ---
- 
+
+## Architecture Rules
+
+### Class-Based OOP
+
+**All modules that maintain state, manage resources, or encapsulate behavior MUST be classes.**
+Pure transformation functions (no state, no side effects, no resource management) may remain as
+exported functions.
+
+```
+USE CLASS when:                        USE FUNCTION when:
+- Holds internal state                 - Pure transformation (in → out)
+- Manages a resource (pool, timer)     - No state, no side effects
+- Has multiple related methods         - Single-purpose utility
+- Lifecycle: init / start / stop       - Helper used in one place
+- Wraps a third-party client
+```
+
+#### Middleware Pattern
+
+Every middleware module exports an **instantiated class** whose `handle()` method is an
+Express middleware function. Instantiation happens once at app startup.
+
+```js
+// ✅ CORRECT — Class-based middleware
+class RateLimiterMiddleware {
+    constructor(options = {}) {
+        this._max = options.max ?? parseInt(process.env.RATE_LIMIT_MAX, 10);
+        this._windowMs = options.windowMs ?? parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10);
+        this._store = new NodeCache({ stdTTL: 3600, useClones: false });
+    }
+
+    handle(req, res, next) {
+        // ... middleware logic
+    }
+
+    getStats() {
+        return this._store.getStats();
+    }
+}
+
+// Export a default instance + the class for custom instances
+const defaultRateLimiter = new RateLimiterMiddleware();
+module.exports = { RateLimiterMiddleware, defaultRateLimiter };
+```
+
+```js
+// app.js usage
+const { defaultRateLimiter } = require('./middleware/security/RateLimiterMiddleware');
+app.use(defaultRateLimiter.handle.bind(defaultRateLimiter));
+```
+
+#### Controller Pattern
+
+Controllers are **classes** with static methods (or bound instance methods).
+Each controller handles one resource. Never put DB calls or business logic in controllers.
+
+```js
+class UserController {
+    static getById = catchAsync(async (req, res) => {
+        const user = await UserService.getById(req.params.id);
+        res.json(sendSuccess('User fetched', user));
+    });
+
+    static create = catchAsync(async (req, res) => {
+        const user = await UserService.create(req.body);
+        res.status(HTTP_STATUS.CREATED).json(sendSuccess('User created', user));
+    });
+}
+
+module.exports = UserController;
+```
+
+#### Service Pattern
+
+Services are **classes** that own all business logic for a domain.
+They talk to models/DB directly. They throw `AppError` on failure — never send HTTP responses.
+
+```js
+class UserService {
+    static async getById(id) {
+        const user = await UserModel.findById(id);
+        if (!user) throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, HTTP_STATUS.NOT_FOUND);
+        return user;
+    }
+}
+
+module.exports = UserService;
+```
+
+---
+
+## Constants — Detailed Structure
+
+### Why Three Sub-Directories?
+
+| Directory | Purpose | Contents |
+|-----------|---------|---------|
+| `constants/errors/` | Operational error definitions | `AppError` class, static error strings used in `throw` statements |
+| `constants/responses/` | Success response helpers | `sendSuccess`, `sendError` formatting functions + success message strings |
+| `constants/messages/` | Log message templates | Functions/strings used **only in logger calls**, never thrown or sent to clients |
+
+### The `messages/` Namespace — Breakdown
+
+The original `messages.js` was a single large file with Oracle pool messages and Oracle wrapper
+messages mixed together. It is now split by concern:
+
+```
+constants/messages/
+├── index.js                  # Re-exports all namespaces as named exports
+├── oracle.messages.js        # Pool lifecycle, health monitor, driver init
+├── oracleWrapper.messages.js # Oracle-Mongo-Wrapper parser/schema validation
+├── auth.messages.js          # JWT verify errors, permission denied details
+├── middleware.messages.js    # IP blocked, rate limit exceeded, CSRF, security filter
+└── database.messages.js      # Generic DB op failed, connection timeout
+```
+
+```js
+// ✅ constants/messages/index.js
+module.exports = {
+    ...require('./oracle.messages'),       // { oracleMessages }
+    ...require('./oracleWrapper.messages'), // { oracleMongoWrapperMessages }
+    ...require('./auth.messages'),          // { authMessages }
+    ...require('./middleware.messages'),    // { middlewareMessages }
+    ...require('./database.messages'),      // { databaseMessages }
+};
+```
+
+**Rule:** If a string is used in a `throw new AppError(...)` → it belongs in `constants/errors/`.
+If it is used in a `res.json(sendSuccess(...))` → it belongs in `constants/responses/`.
+If it is used in a `logger.info(...)` or `logger.error(...)` → it belongs in `constants/messages/`.
+
+---
+
+## Authentication & Authorization — Dynamic Permissions
+
+### Problem with the Old Design
+
+The old `auth.js` had hardcoded `AREAS` and `ROLES` constants. Every project built on this
+template had different permission models, so hardcoding `INV_CON`, `INV_UNIT_SUP` etc.
+was wrong.
+
+### New Design: Dynamic Permission Model
+
+Permissions are **data-driven**, not hardcoded. The JWT payload carries a `permissions` array
+(or `userLevel` number). The `requireAccess` factory accepts a **predicate function** that
+receives the decoded user and returns `true/false`.
+
+```js
+// ✅ CORRECT — Dynamic access control
+class AuthMiddleware {
+    // Attach decoded JWT to req.user
+    static authenticate(req, res, next) { /* ... */ }
+
+    // Factory: returns middleware that checks a predicate against req.user
+    // predicate: (user) => boolean
+    static requireAccess(predicate, options = {}) {
+        return (req, res, next) => {
+            if (!req.user) return next(new AppError(AUTH_ERRORS.USER_NOT_FOUND, 401));
+            if (!predicate(req.user)) return next(new AppError(AUTH_ERRORS.FORBIDDEN_ACCESS, 403));
+            next();
+        };
+    }
+}
+```
+
+**Usage in routes** — each project defines its own access rules:
+
+```js
+// Project A: role-based only
+router.get('/report',
+    AuthMiddleware.authenticate,
+    AuthMiddleware.requireAccess(user => user.userLevel >= 2),
+    ReportController.get,
+);
+
+// Project B: area/permission-based
+router.post('/inventory',
+    AuthMiddleware.authenticate,
+    AuthMiddleware.requireAccess(user => {
+        const areas = (user.area ?? '').split(',').map(a => a.trim());
+        return areas.includes('INV_CON');
+    }),
+    InventoryController.create,
+);
+
+// Project C: combined
+router.delete('/admin',
+    AuthMiddleware.authenticate,
+    AuthMiddleware.requireAccess(user =>
+        user.userLevel >= 3 && user.permissions?.includes('DELETE_USERS')
+    ),
+    AdminController.deleteUser,
+);
+```
+
+**Why this is better:**
+- No `AREAS` or `ROLES` constants in the template — they belong to the consuming application
+- The template ships a **mechanism**, not a hard-coded permission set
+- Each route documents its own access requirement inline — no mystery
+- Backwards-compatible: `user.userLevel >= N` still works for simple projects
+
+---
+
+## Logger — Usage Rules
+
+`src/utils/logger.js` is the **only** logger in the application.
+**Never use `console.log`, `console.error`, or any other logging mechanism in production code.**
+
+### Log Format
+
+```
+[MACHINE_IDENTIFIER] [TIMESTAMP] [LEVEL] [PID:processId] [FUNCTION @ FILE:LINE] [REQUEST_PHASE?] [METHOD] - MESSAGE | META: {...}
+
+Examples:
+
+Server function call:
+[JmPaunlagui (S) 192.168.100.92] [2025-08-22 19:43:03] [INFO] [PID:23632] [initializePool @ src/config/adapters/oracle.js:234] [FUNC] - UserAccount pool created successfully
+
+Client incoming request:
+[paunlaguij@48022603 (C) 192.168.100.187] [2025-08-22 19:43:13] [INFO] [PID:23632] [handle @ src/middleware/traceability/TraceabilityMiddleware.js:55] [Incoming Request] [POST] - [POST @ /api/v1/auth/login]
+
+Client request complete:
+[paunlaguij@48022603 (C) 192.168.100.187] [2025-08-22 19:43:13] [INFO] [PID:23632] [handle @ src/middleware/traceability/TraceabilityMiddleware.js:80] [Request Complete] [POST] - [POST @ /api/v1/auth/login]
+```
+
+### Log Truncation Policy
+
+**Logs are NEVER truncated by default.** Truncation defeats the purpose of traceability.
+The `MAX_SAFESTR_LENGTH` option is configurable via `LOG_MAX_SAFESTR_LENGTH` env var
+(defaults to `Infinity`). Only set a limit if disk I/O is a specific concern.
+
+```js
+// logger.js — safeStringify with configurable max
+#safeStringify(value, maxLength = this._maxSafeStrLength) {
+    // maxLength defaults to Infinity (no cut)
+}
+```
+
+### Logger API
+
+```js
+const { logger } = require('../utils/logger');
+
+// General purpose
+logger.info('Message', { key: 'value' });
+logger.warn('Message', { key: 'value' });
+logger.error('Message', { key: 'value', stack: err.stack });
+logger.debug('Message', { key: 'value' });
+
+// HTTP request lifecycle (attach client machine identifier automatically)
+logger.logIncomingRequest(req);
+logger.logHandlingRequest(req, { userId: 12345 });
+logger.logCompletedRequest(req, res, durationMs);
+
+// Specialized
+logger.cache('GET', 'cache:users:42', 'HIT', 3);       // cache op
+logger.database('SELECT', 'USERS', 12, 5);              // db op
+logger.performance('generateReport', 4200, { rows: 50000 }); // slow op warning
+logger.security('IP_BLOCKED', { ip: '10.0.0.1' });      // security event
+```
+
+### Logger Integration in Classes
+
+```js
+// ✅ CORRECT — logger used in every class that logs
+const { logger } = require('../../utils/logger');
+const { oracleMessages } = require('../../constants/messages');
+
+class OracleAdapter {
+    async #createPool(name, config, attempt = 0) {
+        logger.info(oracleMessages.POOL_CREATING(name));
+        try {
+            const pool = await oracledb.createPool(config);
+            logger.info(oracleMessages.POOL_READY(name, pool));
+            return pool;
+        } catch (err) {
+            logger.error(oracleMessages.POOL_FAILED(name, attempt + 1, 4, err.message));
+            throw err;
+        }
+    }
+}
+```
+
+**Rule:** All log message template strings (e.g. `POOL_CREATING(name)`) live in
+`constants/messages/oracle.messages.js` — never inline strings in class methods.
+
+---
+
+## Environment Variables
+
+All environment variables are documented in `.env.example`.
+**Never import `dotenv` directly in feature files** — only `server.js` and compiled-env bootstrap.
+**Never hardcode values** that belong in `.env.example`.
+
+Complete `.env.example` categories:
+
+```
+# ── Server ──────────────────────────────────────────────────────────
+PORT, HOST, NODE_ENV, USE_HTTPS, APP_NAME
+
+# ── Clustering ──────────────────────────────────────────────────────
+ENABLE_CLUSTERING, NUM_WORKERS
+
+# ── JWT ─────────────────────────────────────────────────────────────
+JWT_SECRET, JWT_EXPIRES_IN, JWT_REFRESH_EXPIRES_IN
+
+# ── CSRF ────────────────────────────────────────────────────────────
+CSRF_SECRET
+
+# ── CORS ────────────────────────────────────────────────────────────
+CORS_ORIGINS
+
+# ── Cookies ─────────────────────────────────────────────────────────
+COOKIE_SECRET
+
+# ── Body Parsing ────────────────────────────────────────────────────
+BODY_LIMIT
+
+# ── Rate Limiting ───────────────────────────────────────────────────
+RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, TRUST_PROXY
+
+# ── IP Filtering ────────────────────────────────────────────────────
+ENABLE_IP_FILTER, ALLOWED_IPS
+
+# ── Database (Oracle) ───────────────────────────────────────────────
+DB_TYPE, DB_HOST, DB_PORT, DB_SERVICE_NAME
+UA_DB_USERNAME, UA_DB_PASSWORD
+UI_DB_USERNAME, UI_DB_PASSWORD
+
+# ── Database (Test / Dev) ───────────────────────────────────────────
+DB_TEST_HOST, DB_TEST_PORT, DB_TEST_SID
+UI_TEST_DB_USERNAME, UI_TEST_DB_PASSWORD
+
+# ── Oracle Instant Client ───────────────────────────────────────────
+ORACLE_INSTANT_CLIENT
+
+# ── Logging ─────────────────────────────────────────────────────────
+LOG_LEVEL, ENABLE_CONSOLE_LOGS, LOG_EXCLUDE_HEALTH, LOG_EXCLUDE_URLS
+LOG_MAX_SAFESTR_LENGTH    # Defaults to Infinity (no truncation). Set a number only if needed.
+LOG_CALLSITE              # true/false — capture function/file/line in logs (default: true)
+
+# ── Password Hashing ────────────────────────────────────────────────
+PASSWORD_HASH_MODE        # 'bcrypt' for production, 'plain' for development only
+
+# ── PKG ─────────────────────────────────────────────────────────────
+PFX_PASSPHRASE            # Passphrase for PFX certificate (HTTPS)
+```
+
+---
+
 ## API Response Shape
-Always use the standardized response format. Never return raw data.
-- for error responses: status + code + message + error details (include type, stack trace, and any relevant hints for debugging. and where the error occurred in the codebase if possible)
-- for success responses: status + code + message + data
- 
-**Success:**
+
+Always use helpers from `constants/responses/`. **Never return raw data.**
+
 ```json
+// Success
 {
   "status": "success",
   "code": 200,
   "message": "User fetched successfully",
   "data": { ... }
 }
-```
 
-**Error:**
-```json
+// Error
 {
   "status": "error",
   "code": 400,
@@ -134,123 +486,204 @@ Always use the standardized response format. Never return raw data.
   "error": {
     "type": "ValidationError",
     "details": [
-      { "field": "email", "issue": "Invalid email format" },
-      { "field": "password", "issue": "Password must be at least 8 characters" }
+      { "field": "email", "issue": "Invalid email format" }
     ],
-    "hint": "Ensure the email is valid and the password meets complexity requirements.",
-    "stack": "ValidationError: Invalid request data at ... "
+    "hint": "Ensure the email is a valid address.",
+    "stack": "ValidationError: ... (development only)"
   }
 }
 ```
 
-Use `sendSuccess(message, data)` and `sendError(message, error)` helpers to generate these responses in controllers.
- 
----
- 
-## Error Handling
-- Throw `new AppError(message, statusCode)` from services/controllers
-- The global error middleware in `middlewares/errorHandler.js` catches everything
-- Never `console.error` raw errors in production — use the Winston logger
-- Handle unhandled promise rejections and uncaught exceptions in `app.js`
- 
----
- 
-## Middleware Stack (order matters)
 ```js
-app.use(helmet())
-app.use(cors())
-app.use(express.json())
-app.use(morgan('dev'))
-app.use(rateLimiter)
+// In controllers
+res.json(sendSuccess(RESPONSE_MESSAGES.USER_FETCHED, user));
+res.status(HTTP_STATUS.CREATED).json(sendSuccess(RESPONSE_MESSAGES.USER_CREATED, user));
+
+// In error handler (via AppError)
+throw new AppError(AUTH_ERRORS.USER_NOT_FOUND, HTTP_STATUS.UNAUTHORIZED);
 ```
-Do not reorder these without a reason.
- 
+
 ---
- 
-## Auth
-- JWT-based auth. Tokens issued at `POST /api/v1/auth/login`
-- Protect routes with `authenticate` middleware from `middlewares/auth.js`
-- Refresh tokens stored in DB; access tokens are stateless
-- Passwords hashed with `bcryptjs` or plain text which is configured in `.env` (for testing)
- 
-Auth routes:
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/refresh`
-- `POST /api/v1/auth/logout`
- 
+
+## Error Handling
+
+- Services throw `new AppError(message, statusCode, { type, details, hint })`
+- The global `ErrorHandlerMiddleware` catches everything — including `AppError`, DB errors, and unexpected crashes
+- `catchAsync(fn)` wraps async controller methods — missing it will crash the process on unhandled rejections
+- **Never** `console.error` raw errors — always `logger.error(...)`
+- Unhandled promise rejections and uncaught exceptions are handled in `server.js`
+
+```js
+// AppError usage
+throw new AppError(AUTH_ERRORS.FORBIDDEN_ACCESS, HTTP_STATUS.FORBIDDEN, {
+    type: 'AuthorizationError',
+    hint: 'You do not have the required permission for this resource.',
+});
+```
+
 ---
- 
+
+## Middleware Stack (order matters — do not reorder)
+
+```js
+// app.js
+app.use(helmetMiddleware.handle)           // 1. Security headers
+app.use(securityFilter.handle)             // 2. Block scanners / traversal EARLY
+app.use(addRequestId.handle)              // 3. Inject X-Request-Id before logging
+app.use(jsonParser.handle)                // 4. Body parsing before logging (req.body available)
+app.use(urlencodedParser.handle)
+app.use(requestLogger.handle)             // 5. Log incoming + completed requests
+app.use(trackResponseTime.handle)         // 6. X-Response-Time header
+app.use(compressionMiddleware.handle)     // 7. Compress responses
+app.use(corsMiddleware.handle)            // 8. CORS
+app.use(cookieParser.handle)              // 9. Cookie parsing
+app.use(captureResponseBody.handle)       // 10. Capture body for logging
+app.use(createIpFilter.handle)            // 11. IP allowlist
+app.use(defaultRateLimiter.handle)        // 12. Rate limiting
+app.use('/api', preventRedirects.handle)  // 13. API-only redirect prevention
+```
+
+---
+
+## Auth Routes (Standard)
+
+```
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+POST /api/v1/auth/refresh
+POST /api/v1/auth/logout
+```
+
+---
+
 ## Route Conventions
+
 - All routes prefixed with `/api/v1/`
 - Group by resource: `authRoutes`, `userRoutes`, etc.
-- Health check: `GET /health` → always returns `200 OK`
- 
+- Health check: `GET /api/v1/health` → always returns `200 OK`
+- Route files are named `<resource>.route.js`
+
 ---
- 
+
 ## Validation
-- Validate all incoming request bodies using `zod` (or `joi` — check existing schemas)
-- Validation middleware sits before the controller in the route definition
-- Reject early; never let invalid data reach the service layer
- 
+
+- Validate all incoming request bodies using `zod` (preferred) or `express-validator`
+- Validation middleware sits **before** the controller in the route definition
+- Reject early — never let invalid data reach the service layer
+- Validation errors become `AppError` with `details` array matching the error response shape
+
 ---
- 
-## Environment Variables
-- Copy `.env.example` and fill values before running
-- Load via `src/config/env.js` — never import `dotenv` directly in feature files
-- Required vars: `PORT`, `NODE_ENV`, `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN`
+
+## Database — OracleDB Adapter Rules
+
+- **Dual-pool pattern**: separate pools per named connection (`userAccount`, `unitInventory`, etc.)
+- Adding a new connection requires only a new entry in `src/config/database.js` — no other file changes
+- `PoolHealthMonitor` runs every 30 seconds, marks unhealthy pools after 3 consecutive failures
+- Exponential backoff on pool init: 3 retries, delay `min(1000 * 2^n, 10000)ms`
+- **Never** use raw `oracledb` outside `src/config/adapters/oracle.js`
+
+```js
+// Usage everywhere else in the app
+const db = require('../config');
+await db.withConnection('userAccount', async (conn) => {
+    const result = await conn.execute('SELECT 1 FROM DUAL');
+    return result.rows;
+});
+```
+
+---
+
+## OracleDB Wrapper Library
+
+The `oracle-mongo-wrapper` in `src/utils/oracle-mongo-wrapper/` is the **unique feature**
+of this template. It provides a MongoDB-style API backed by Oracle SQL:
+
+```js
+const { createDb, OracleCollection } = require('../utils/oracle-mongo-wrapper');
+const db = createDb('userAccount');
+const users = new OracleCollection('T_OPITS_USERS', db);
+
+const row = await users.findOne({ USERNAME: 'jmpaunlagui' });
+await users.updateOne({ ID: row.ID }, { $set: { STATUS: 'active' } });
+```
+
+Full API documented in `src/utils/oracle-mongo-wrapper/README.md`.
+
+---
+
+## PKG Compilation
+
+The application can be compiled into a standalone Windows executable via `pkg`:
+
+```bash
+npm run build        # Produces dist/meal_backend.exe
+npm run build:debug  # With debug output
+```
+
+Requirements for PKG compatibility:
+1. `src/utils/encodingPolyfill.js` is **always the first require** in `server.js`
+2. `src/utils/nanoidLoader.js` handles nanoid's ESM-only issue in compiled environments
+3. `src/config/adapters/oracle.js` handles Thick mode init for compiled Oracle client
+4. `src/utils/consoleManager.js` sets the process title for the compiled exe window
+
+---
 
 ## Gotchas
-- Always use `catchAsync` around async controller functions — missing it will crash the process on unhandled rejections
-- `cors()` origin whitelist is in `src/config/constants.js` — update it for new environments
-- Prisma: run `npx prisma generate` after any schema change before starting the server
-- Rate limiter is per-IP by default — adjust `windowMs` and `max` in `middlewares/rateLimiter.js` for specific routes if needed
-- Cache middleware is in `middlewares/performance/cache.js` — use it on routes that can benefit from caching (e.g. GET requests with heavy DB queries)
-- Make Cache middleware configurable via route options (e.g. `cacheDuration`) for flexibility in different scenarios
-- Make cache keys unique per route and query parameters to avoid collisions and ensure correct caching behavior
-- Ensure that the cache middleware properly handles cache invalidation when underlying data changes (e.g. after POST/PUT/DELETE requests that modify data relevant to cached GET requests)
 
-## Server References
-- D:\Web\OPTISv2\OPITS-BE
-- You can review the OPTISv2 backend codebase to improve the structure and features of this template, especially for the OracleDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities in `src/utils/oracle-mongo-wrapper/`. This will help ensure that the template is robust and can handle complex database interactions effectively.
-- What the OPTISv2 backend doesn't have is the new Oracle MongoDB wrapper library that mimics MongoDB's API while leveraging Oracle's SQL capabilities in `src/utils/oracle-mongo-wrapper/`. This is a unique feature that can set this template apart and make it more versatile for developers who want to use OracleDB with a familiar MongoDB-like interface.
-- Analyze the OPTISv2 backend codebase to identify any additional features or improvements that can be incorporated into this template, such as enhanced error handling, better logging practices, or more efficient database connection management. This will help ensure that the template is not only functional but also follows best practices for building scalable and maintainable APIs.
-- The behavior of the OPITSv2 backend is that when i start it, the server first checks if the dependences are compatible with pkg, because i compile the backend in a executable file, and then it starts the server. This is a good practice to ensure that the application can run smoothly in different environments without dependency issues. You can consider adding a similar check in this template to enhance its robustness and compatibility when compiled into an executable using pkg.
+- Always use `catchAsync` around async controller functions — missing it crashes on unhandled rejections
+- `cors()` origin patterns are in `CorsMiddleware.js` — add project-specific origins to `CORS_ORIGINS` env var
+- Rate limiter is per-IP by default — create `new RateLimiterMiddleware({ max: 5 })` for strict routes
+- Cache middleware configures TTL per-route: `cacheMiddleware.handle({ ttl: 60 })` on GET routes with heavy DB queries
+- Cache keys must include route path + query params to avoid collisions
+- Cache middleware must invalidate on POST/PUT/DELETE for routes that share cache keys with GET endpoints
+- Log files are organized as `logs/YYYY/MM/DD/level.log` — they rotate daily, never truncate mid-message
+- `LOG_MAX_SAFESTR_LENGTH` defaults to `Infinity` — only set it if you encounter disk-space issues in a specific environment
+- `PASSWORD_HASH_MODE=plain` is **only** for local development — always `bcrypt` in production
 
-# OPTISv2 Reference Codebase Analysis
+---
 
-## Key Architectural Differences from MEAL Template
+## OPTISv2 Reference Analysis
 
-### What OPTISv2 has that MEAL should adopt:
-1. **PKG polyfills** (`encodingPolyfill.js`) - loaded first in server.js for compiled executable compatibility
-2. **Dual DB pool pattern** with PoolHealthMonitor (30s health checks, 3-strike unhealthy marking)
-3. **Exponential backoff** on pool init (3 retries, delay = min(1000*2^n, 10000))
-4. **Security filter middleware** - blocks path traversal, script injection, scanner requests, suspicious IPs
-5. **Machine identifier in logs** - hostname + IP for server identification
-6. **Request ID middleware** (nanoid per request, X-Request-Id header)
-7. **Response time tracking** with slow response detection
-8. **Performance middleware** tracking microsecond precision
-9. **Object pooling** for arrays/objects in high-frequency DB operations
-11. **Cache domains** organized by purpose (REAL_TIME, BUSINESS, REFERENCE, EXPORTS, LOGS)
-12. **Clustering support** (Master/Worker pattern, configurable via ENABLE_CLUSTERING)
-13. **Advanced CORS** supporting VPN, WFH, corporate, local network scenarios
-14. **Console manager** - process titles for pkg, ASCII art, daily clearing
-15. **Graceful batch processing** - partial success/failure without cascading
+The OPTISv2 backend at `D:\Web\OPTISv2\OPITS-BE` is used as a reference for
+advanced patterns. Key features borrowed from OPTISv2:
 
-### What OPTISv2 does differently (not necessarily better):
-- No controllers folder - routes call services directly (MEAL properly separates)
-- No catchAsync - uses direct try/catch in routes (MEAL has catchAsync, which is better)
-- Response format uses `success: true/false` vs MEAL's `status: "success"/"error"` with code
-- No AppError class - throws plain Error objects
-- Plain text password comparison (configurable, not always bcrypt)
+| Feature | Status |
+|---------|--------|
+| PKG encoding polyfills (`encodingPolyfill.js`) | ✅ Implemented |
+| Dual DB pool + PoolHealthMonitor (30s, 3-strike) | ✅ Implemented |
+| Exponential backoff on pool init (3 retries) | ✅ Implemented |
+| Security filter (scanner/traversal blocking) | ✅ Implemented |
+| Machine identifier in logs (hostname + IP) | ✅ Implemented |
+| Request ID middleware (nanoid, `X-Request-Id`) | ✅ Implemented |
+| Response time tracking + slow detection | ✅ Implemented |
+| Clustering support (master/worker, configurable) | ✅ Implemented |
+| Advanced CORS (VPN, WFH, corporate, local) | ✅ Implemented |
+| Console manager (process title, ASCII art, daily clear) | ✅ Implemented |
+| Cache domains by purpose | ⬜ Available via node-cache, configure per-project |
+| Object pooling for high-frequency DB ops | ⬜ Optional, add if profiling indicates need |
+| Graceful batch processing (partial success) | ✅ Via `withBatchConnection` |
 
-### What MEAL already has that OPTISv2 lacks:
-- oracle-mongo-wrapper library (unique to MEAL)
-- Proper controller layer separation
-- catchAsync utility
-- AppError with structured error responses
-- Standardized sendSuccess/sendError helpers
-- Adapter pattern for database (MySQL + Oracle)
+### What MEAL has that OPTISv2 lacks (keep these)
 
-## What we dont need to change in MEAL:
-- 10. **Query optimizer** with Oracle hints (FIRST_ROWS, PARALLEL, USE_HASH, etc.)
+- `oracle-mongo-wrapper` library — unique to MEAL
+- `AppError` + structured error responses
+- `catchAsync` utility
+- `sendSuccess` / `sendError` helpers
+- Adapter pattern for database engines
+- Proper controller/service layer separation
+- Class-based architecture across all middleware
+
+### What OPTISv2 does differently (not adopted)
+
+- No controller layer (routes call services directly) — MEAL's separation is better
+- No `catchAsync` — uses raw try/catch in routes — MEAL's approach is safer
+- Response uses `success: true/false` — MEAL's `status: "success"/"error"` with `code` is richer
+- No `AppError` — throws plain `Error` — MEAL's typed errors enable cleaner error handling
+
+---
+
+## What NOT to Change
+
+- The `oracle-mongo-wrapper` query optimizer (Oracle hints) — not needed at this level
+- The overall CTE-chaining approach in `aggregatePipeline.js` — it works
+- The `withConnection` / `withTransaction` / `withBatchConnection` API surface — stable
