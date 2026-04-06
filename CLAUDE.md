@@ -633,9 +633,11 @@ Requirements for PKG compatibility:
 - Always use `catchAsync` around async controller functions — missing it crashes on unhandled rejections
 - `cors()` origin patterns are in `CorsMiddleware.js` — add project-specific origins to `CORS_ORIGINS` env var
 - Rate limiter is per-IP by default — create `new RateLimiterMiddleware({ max: 5 })` for strict routes
-- Cache middleware configures TTL per-route: `cacheMiddleware.handle({ ttl: 60 })` on GET routes with heavy DB queries
-- Cache keys must include route path + query params to avoid collisions
-- Cache middleware must invalidate on POST/PUT/DELETE for routes that share cache keys with GET endpoints
+- Cache stores are registered once at startup via `registry.registerAll({...})` — resolving an unregistered name throws immediately.
+- Always build cache keys with `CacheKeyBuilder` — never concatenate strings manually; parameters are sorted alphabetically so call-site order never matters.
+- `CacheMiddleware.read()` only caches 2xx JSON responses; errors are never stored.
+- Invalidation runs in `setImmediate` (fire-and-forget) so it never blocks the response.
+- Use `store.delByPattern(prefix)` for broad invalidation; use `store.del(exactKey)` for surgical precision.
 - Log files are organized as `logs/YYYY/MM/DD/level.log` — they rotate daily, never truncate mid-message
 - `LOG_MAX_SAFESTR_LENGTH` defaults to `Infinity` — only set it if you encounter disk-space issues in a specific environment
 - `PASSWORD_HASH_MODE=plain` is **only** for local development — always `bcrypt` in production
@@ -659,7 +661,7 @@ advanced patterns. Key features borrowed from OPTISv2:
 | Clustering support (master/worker, configurable) | ✅ Implemented |
 | Advanced CORS (VPN, WFH, corporate, local) | ✅ Implemented |
 | Console manager (process title, ASCII art, daily clear) | ✅ Implemented |
-| Cache domains by purpose | ⬜ Available via node-cache, configure per-project |
+| Cache system (domain-agnostic, OOP, registry + key-builder + middleware) | ✅ Implemented in `src/middleware/cache/` |
 | Object pooling for high-frequency DB ops | ⬜ Optional, add if profiling indicates need |
 | Graceful batch processing (partial success) | ✅ Via `withBatchConnection` |
 
@@ -679,6 +681,147 @@ advanced patterns. Key features borrowed from OPTISv2:
 - No `catchAsync` — uses raw try/catch in routes — MEAL's approach is safer
 - Response uses `success: true/false` — MEAL's `status: "success"/"error"` with `code` is richer
 - No `AppError` — throws plain `Error` — MEAL's typed errors enable cleaner error handling
+
+---
+
+## Cache System
+
+The cache subsystem lives in `src/middleware/cache/`. It is **domain-agnostic** — it ships zero inventory or project-specific logic, so it ports cleanly to any project built on this template.
+
+### File Map
+
+```
+src/middleware/cache/
+├── index.js           # Barrel — import everything from here
+├── CacheStore.js      # Low-level NodeCache wrapper (get/set/del/flush/getOrSet)
+├── CacheRegistry.js   # Singleton registry: register → resolve → statsAll
+├── CacheKeyBuilder.js # Fluent, deterministic key construction
+└── CacheMiddleware.js # Express middleware factory (read / invalidate / invalidateWhere)
+```
+
+### Four Building Blocks
+
+| Class | Responsibility |
+|---|---|
+| `CacheStore` | Wraps one NodeCache instance. Emits structured log lines on every operation. Exposes `getOrSet()` for service-layer read-through. |
+| `CacheRegistry` | Singleton that owns all `CacheStore` instances. The only place where stores are created. |
+| `CacheKeyBuilder` | Fluent builder that sorts parameters alphabetically and auto-hashes keys > 200 chars. |
+| `CacheMiddleware` | Express middleware factory. `read()` = cache-aside. `invalidate()` = post-response cleanup. |
+
+### Project Bootstrap
+
+Register **all** stores once at startup (e.g. `app.js` or a dedicated `src/middleware/cache/setup.js`):
+
+```js
+const { registry } = require('./middleware/cache');
+
+registry.registerAll({
+    users:   { ttl: 300  },           // expire after 5 min
+    reports: { ttl: 0    },           // never expire — manual invalidation only
+    tokens:  { ttl: 900, maxKeys: 10000 },
+});
+```
+
+### Using on HTTP Routes
+
+```js
+const { CacheMiddleware, CacheKeyBuilder, registry } = require('../middleware/cache');
+const usersStore = registry.resolve('users');
+
+// ── Read-through GET ──────────────────────────────────────────────────────────
+router.get('/users',
+    CacheMiddleware.read(
+        usersStore,
+        (req) => CacheKeyBuilder.build('users', {
+            division: req.query.division,
+            page:     req.query.page,
+        }),
+    ),
+    UserController.list,
+);
+
+// ── Exact-key invalidation after POST ────────────────────────────────────────
+router.post('/users',
+    UserController.create,
+    CacheMiddleware.invalidate(
+        usersStore,
+        (req) => CacheKeyBuilder.build('users', { division: req.body.division }),
+    ),
+);
+
+// ── Pattern invalidation (wipe everything that starts with "users") ──────────
+router.delete('/users/:id',
+    UserController.remove,
+    CacheMiddleware.invalidate(usersStore, () => 'users', { usePattern: true }),
+);
+
+// ── Predicate invalidation (fine-grained multi-store) ────────────────────────
+router.put('/users/:id',
+    UserController.update,
+    CacheMiddleware.invalidateWhere(
+        [usersStore, reportsStore],
+        (key, req) => key.includes(`division=${req.body.division}`),
+    ),
+);
+```
+
+### Service-Layer Read-Through (No HTTP)
+
+```js
+const { registry }       = require('../middleware/cache');
+const { CacheKeyBuilder } = require('../middleware/cache');
+
+const reports = registry.resolve('reports');
+
+class ReportService {
+    static async getSummary(filters) {
+        const key = CacheKeyBuilder.build('report:summary', filters);
+        return reports.getOrSet(key, () => ReportModel.query(filters));
+    }
+}
+```
+
+### Manual Invalidation from a Service
+
+```js
+// Exact delete
+reports.del(CacheKeyBuilder.build('report:summary', { year: 2025, month: 1 }));
+
+// Pattern delete — removes all keys whose string contains "report:summary"
+reports.delByPattern('report:summary');
+
+// Predicate delete — full control
+reports.delWhere((key) => key.startsWith('report:') && key.includes('year=2025'));
+
+// Flush entire store
+reports.flush();
+
+// Flush all stores at once
+registry.flushAll();
+```
+
+### Architecture Rules for the Cache System
+
+**Rule:** Every cache store name must be a noun describing the data it holds (`users`, `reports`, `tokens`), not a verb or an endpoint path.
+
+**Rule:** `CacheKeyBuilder` is the **only** way to construct cache keys. Never build key strings manually.
+
+**Rule:** All stores are registered at boot via `registry.registerAll()` before any request is served. Resolving an unregistered store throws immediately — no silent misses masking bugs.
+
+**Rule:** `CacheMiddleware.invalidate()` and `invalidateWhere()` run in `setImmediate` — they never block the HTTP response.
+
+**Rule:** The `CacheStore`, `CacheRegistry`, `CacheKeyBuilder`, and `CacheMiddleware` classes contain **zero** domain-specific logic. Project-specific key shapes and invalidation triggers belong to the route files or a project-level `src/middleware/cache/setup.js`.
+
+### What the OPITS-BE Cache Did Wrong (Do Not Repeat)
+
+| Problem | Fix in MEAL template |
+|---|---|
+| `cache.js` had 1 500+ lines of inventory-specific logic baked in | Domain logic is **outside** the cache classes |
+| Key construction was ad-hoc string concatenation spread across hundreds of call sites | `CacheKeyBuilder` is the single source of truth |
+| Two files (`cache.js` + `cacheManagement.js`) for one concern | Four small, single-responsibility classes |
+| `CacheInvalidator` had 30+ methods for specific operations | One generic `invalidate()` / `invalidateWhere()` covers every case |
+| `CacheWrapper.execute()` wrapped NodeCache in yet another layer | `CacheStore.getOrSet()` is the direct equivalent, without the indirection |
+| TTL was controlled by a global env var that affected all caches | Each store gets its own `ttl` at registration time |
 
 ---
 
