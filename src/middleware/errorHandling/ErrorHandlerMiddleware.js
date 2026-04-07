@@ -8,7 +8,6 @@
 
 const { logger } = require("../../utils/logger");
 const { AppError } = require("../../constants/errors");
-const { path } = require("pdfkit");
 
 class ErrorHandlerMiddleware {
     constructor() {
