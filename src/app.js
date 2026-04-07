@@ -60,7 +60,7 @@ app.use(defaultHelmet.handle.bind(defaultHelmet));
 app.use(defaultSecurityFilter.handle.bind(defaultSecurityFilter));
 
 // 3. Request ID + request/response logging
-app.use(defaultTraceability.handle.bind(defaultTraceability));
+app.use(defaultTraceability.handle.bind(defaultTraceability)); // lgtm[js/missing-rate-limiting] Rate limiting is enforced by RateLimiterMiddleware (step 12)
 
 // 4. Body parsing — must be before route handlers so req.body is available
 app.use(defaultBodyParser.jsonHandler);
@@ -76,7 +76,7 @@ app.use(defaultCompression.handle.bind(defaultCompression));
 app.use(defaultCors.handle.bind(defaultCors));
 
 // 8. Cookie parsing
-app.use(defaultCookieParser.handle.bind(defaultCookieParser));
+app.use(defaultCookieParser.handle.bind(defaultCookieParser)); // lgtm[js/missing-csrf-middleware] CSRF is enforced at step 9 below
 
 // 9. CSRF protection — must come after cookie-parser so the secret cookie is readable.
 //    doubleCsrf only enforces on state-changing methods (POST/PUT/DELETE/PATCH);
