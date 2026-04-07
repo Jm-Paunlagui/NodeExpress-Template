@@ -2,13 +2,13 @@
     "name": "backend",
     "version": "1.0.0",
     "description": "MEAL Backend API",
-    "homepage": "https://github.com/Jm-Paunlagui/MEAL-BE#readme",
+    "homepage": "https://github.com/Jm-Paunlagui/NodeExpress-Template#readme",
     "bugs": {
-        "url": "https://github.com/Jm-Paunlagui/MEAL-BE/issues"
+        "url": "https://github.com/Jm-Paunlagui/NodeExpress-Template/issues"
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/Jm-Paunlagui/MEAL-BE.git"
+        "url": "git+https://github.com/Jm-Paunlagui/NodeExpress-Template.git"
     },
     "license": "ISC",
     "author": "Jm-Paunlagui",
