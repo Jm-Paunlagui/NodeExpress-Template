@@ -19,9 +19,7 @@ class AuthMiddleware {
      */
     static authenticate(req, res, next) {
         const token =
-            req.cookies?.token ||
-            req.headers["authorization"]?.split(" ")[1] ||
-            req.query?.token;
+            req.cookies?.token || req.headers["authorization"]?.split(" ")[1];
 
         const isFileDownload =
             req.path.includes("/export/") ||
@@ -182,14 +180,26 @@ class AuthMiddleware {
         };
     }
 
+    static _escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#39;");
+    }
+
     static _authHtmlError(title, line1, line2) {
+        const t = AuthMiddleware._escapeHtml(title);
+        const l1 = AuthMiddleware._escapeHtml(line1);
+        const l2 = AuthMiddleware._escapeHtml(line2);
         return `<!DOCTYPE html>
-<html><head><title>${title}</title>
+<html><head><title>${t}</title>
 <style>body{font-family:Arial,sans-serif;margin:40px}.error-container{max-width:600px;margin:0 auto}
 .error-title{color:#d32f2f;margin-bottom:20px}.error-message{background:#f5f5f5;padding:15px;border-radius:4px}
 .login-button{background:#1976d2;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;display:inline-block;margin-top:15px}</style>
-</head><body><div class="error-container"><h1 class="error-title">${title}</h1>
-<div class="error-message"><p>${line1}</p><p>${line2}</p></div>
+</head><body><div class="error-container"><h1 class="error-title">${t}</h1>
+<div class="error-message"><p>${l1}</p><p>${l2}</p></div>
 <a href="/login" class="login-button">Go to Login</a>
 <a href="javascript:history.back()" class="login-button">Go Back</a>
 </div></body></html>`;

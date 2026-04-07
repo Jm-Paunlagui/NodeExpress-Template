@@ -1,7 +1,8 @@
 // Apply encoding polyfills for compiled environment (must be first)
 require("./src/utils/encodingPolyfill");
 
-("use strict");
+// NOTE: "use strict" cannot precede the polyfill require above, so each module
+// declares its own strict mode via the "use strict" directive at the top.
 
 const dotenv = require("dotenv");
 dotenv.config({ path: ".env" });

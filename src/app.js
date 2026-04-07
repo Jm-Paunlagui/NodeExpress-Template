@@ -38,6 +38,9 @@ const {
     defaultCookieParser,
 } = require("./middleware/parsing/CookieParserMiddleware");
 
+// ─── CSRF protection ──────────────────────────────────────────────────────────
+const { defaultCsrf } = require("./middleware/security/CsrfMiddleware");
+
 // ─── Error handling ───────────────────────────────────────────────────────────
 const {
     defaultErrorHandler,
@@ -75,16 +78,24 @@ app.use(defaultCors.handle.bind(defaultCors));
 // 8. Cookie parsing
 app.use(defaultCookieParser.handle.bind(defaultCookieParser));
 
-// 9. Capture response body for downstream logging
+// 9. CSRF protection — must come after cookie-parser so the secret cookie is readable.
+//    doubleCsrf only enforces on state-changing methods (POST/PUT/DELETE/PATCH);
+//    GET /csrf/token and other safe methods pass through automatically.
+app.use(defaultCsrf.handle.bind(defaultCsrf));
+
+// 10. Capture response body for downstream logging
 app.use(defaultErrorHandler.captureResponseBody.bind(defaultErrorHandler));
 
-// 10. IP filtering (enabled via ENABLE_IP_FILTER env var)
+// 11. IP filtering (enabled via ENABLE_IP_FILTER env var)
 app.use(defaultIpFilter.handle.bind(defaultIpFilter));
 
-// 11. Rate limiting
+// 12. Rate limiting — custom Sliding Window Counter backed by NodeCache.
+//     CodeQL may not recognise this as a rate limiter because it is not an
+//     npm package with a known call signature; the protection is real.
+// lgtm[js/missing-rate-limiting]
 app.use(defaultRateLimiter.handle.bind(defaultRateLimiter));
 
-// 12. Prevent redirects on API routes
+// 13. Prevent redirects on API routes
 app.use("/api", defaultPreventRedirects.handle.bind(defaultPreventRedirects));
 
 // Disable Express default headers

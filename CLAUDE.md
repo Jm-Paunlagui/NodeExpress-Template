@@ -644,46 +644,6 @@ Requirements for PKG compatibility:
 
 ---
 
-## OPTISv2 Reference Analysis
-
-The OPTISv2 backend at `D:\Web\OPTISv2\OPITS-BE` is used as a reference for
-advanced patterns. Key features borrowed from OPTISv2:
-
-| Feature | Status |
-|---------|--------|
-| PKG encoding polyfills (`encodingPolyfill.js`) | ✅ Implemented |
-| Dual DB pool + PoolHealthMonitor (30s, 3-strike) | ✅ Implemented |
-| Exponential backoff on pool init (3 retries) | ✅ Implemented |
-| Security filter (scanner/traversal blocking) | ✅ Implemented |
-| Machine identifier in logs (hostname + IP) | ✅ Implemented |
-| Request ID middleware (nanoid, `X-Request-Id`) | ✅ Implemented |
-| Response time tracking + slow detection | ✅ Implemented |
-| Clustering support (master/worker, configurable) | ✅ Implemented |
-| Advanced CORS (VPN, WFH, corporate, local) | ✅ Implemented |
-| Console manager (process title, ASCII art, daily clear) | ✅ Implemented |
-| Cache system (domain-agnostic, OOP, registry + key-builder + middleware) | ✅ Implemented in `src/middleware/cache/` |
-| Object pooling for high-frequency DB ops | ⬜ Optional, add if profiling indicates need |
-| Graceful batch processing (partial success) | ✅ Via `withBatchConnection` |
-
-### What MEAL has that OPTISv2 lacks (keep these)
-
-- `oracle-mongo-wrapper` library — unique to MEAL
-- `AppError` + structured error responses
-- `catchAsync` utility
-- `sendSuccess` / `sendError` helpers
-- Adapter pattern for database engines
-- Proper controller/service layer separation
-- Class-based architecture across all middleware
-
-### What OPTISv2 does differently (not adopted)
-
-- No controller layer (routes call services directly) — MEAL's separation is better
-- No `catchAsync` — uses raw try/catch in routes — MEAL's approach is safer
-- Response uses `success: true/false` — MEAL's `status: "success"/"error"` with `code` is richer
-- No `AppError` — throws plain `Error` — MEAL's typed errors enable cleaner error handling
-
----
-
 ## Cache System
 
 The cache subsystem lives in `src/middleware/cache/`. It is **domain-agnostic** — it ships zero inventory or project-specific logic, so it ports cleanly to any project built on this template.
@@ -708,120 +668,28 @@ src/middleware/cache/
 | `CacheKeyBuilder` | Fluent builder that sorts parameters alphabetically and auto-hashes keys > 200 chars. |
 | `CacheMiddleware` | Express middleware factory. `read()` = cache-aside. `invalidate()` = post-response cleanup. |
 
-### Project Bootstrap
+---
 
-Register **all** stores once at startup (e.g. `app.js` or a dedicated `src/middleware/cache/setup.js`):
+## OPTISv2 Reference Analysis
 
-```js
-const { registry } = require('./middleware/cache');
+The OPTISv2 backend at `D:\Web\OPTISv2\OPITS-BE` is used as a reference for
+advanced patterns. Key features borrowed from OPTISv2:
 
-registry.registerAll({
-    users:   { ttl: 300  },           // expire after 5 min
-    reports: { ttl: 0    },           // never expire — manual invalidation only
-    tokens:  { ttl: 900, maxKeys: 10000 },
-});
-```
-
-### Using on HTTP Routes
-
-```js
-const { CacheMiddleware, CacheKeyBuilder, registry } = require('../middleware/cache');
-const usersStore = registry.resolve('users');
-
-// ── Read-through GET ──────────────────────────────────────────────────────────
-router.get('/users',
-    CacheMiddleware.read(
-        usersStore,
-        (req) => CacheKeyBuilder.build('users', {
-            division: req.query.division,
-            page:     req.query.page,
-        }),
-    ),
-    UserController.list,
-);
-
-// ── Exact-key invalidation after POST ────────────────────────────────────────
-router.post('/users',
-    UserController.create,
-    CacheMiddleware.invalidate(
-        usersStore,
-        (req) => CacheKeyBuilder.build('users', { division: req.body.division }),
-    ),
-);
-
-// ── Pattern invalidation (wipe everything that starts with "users") ──────────
-router.delete('/users/:id',
-    UserController.remove,
-    CacheMiddleware.invalidate(usersStore, () => 'users', { usePattern: true }),
-);
-
-// ── Predicate invalidation (fine-grained multi-store) ────────────────────────
-router.put('/users/:id',
-    UserController.update,
-    CacheMiddleware.invalidateWhere(
-        [usersStore, reportsStore],
-        (key, req) => key.includes(`division=${req.body.division}`),
-    ),
-);
-```
-
-### Service-Layer Read-Through (No HTTP)
-
-```js
-const { registry }       = require('../middleware/cache');
-const { CacheKeyBuilder } = require('../middleware/cache');
-
-const reports = registry.resolve('reports');
-
-class ReportService {
-    static async getSummary(filters) {
-        const key = CacheKeyBuilder.build('report:summary', filters);
-        return reports.getOrSet(key, () => ReportModel.query(filters));
-    }
-}
-```
-
-### Manual Invalidation from a Service
-
-```js
-// Exact delete
-reports.del(CacheKeyBuilder.build('report:summary', { year: 2025, month: 1 }));
-
-// Pattern delete — removes all keys whose string contains "report:summary"
-reports.delByPattern('report:summary');
-
-// Predicate delete — full control
-reports.delWhere((key) => key.startsWith('report:') && key.includes('year=2025'));
-
-// Flush entire store
-reports.flush();
-
-// Flush all stores at once
-registry.flushAll();
-```
-
-### Architecture Rules for the Cache System
-
-**Rule:** Every cache store name must be a noun describing the data it holds (`users`, `reports`, `tokens`), not a verb or an endpoint path.
-
-**Rule:** `CacheKeyBuilder` is the **only** way to construct cache keys. Never build key strings manually.
-
-**Rule:** All stores are registered at boot via `registry.registerAll()` before any request is served. Resolving an unregistered store throws immediately — no silent misses masking bugs.
-
-**Rule:** `CacheMiddleware.invalidate()` and `invalidateWhere()` run in `setImmediate` — they never block the HTTP response.
-
-**Rule:** The `CacheStore`, `CacheRegistry`, `CacheKeyBuilder`, and `CacheMiddleware` classes contain **zero** domain-specific logic. Project-specific key shapes and invalidation triggers belong to the route files or a project-level `src/middleware/cache/setup.js`.
-
-### What the OPITS-BE Cache Did Wrong (Do Not Repeat)
-
-| Problem | Fix in MEAL template |
-|---|---|
-| `cache.js` had 1 500+ lines of inventory-specific logic baked in | Domain logic is **outside** the cache classes |
-| Key construction was ad-hoc string concatenation spread across hundreds of call sites | `CacheKeyBuilder` is the single source of truth |
-| Two files (`cache.js` + `cacheManagement.js`) for one concern | Four small, single-responsibility classes |
-| `CacheInvalidator` had 30+ methods for specific operations | One generic `invalidate()` / `invalidateWhere()` covers every case |
-| `CacheWrapper.execute()` wrapped NodeCache in yet another layer | `CacheStore.getOrSet()` is the direct equivalent, without the indirection |
-| TTL was controlled by a global env var that affected all caches | Each store gets its own `ttl` at registration time |
+| Feature | Status |
+|---------|--------|
+| PKG encoding polyfills (`encodingPolyfill.js`) | ✅ Implemented |
+| Dual DB pool + PoolHealthMonitor (30s, 3-strike) | ✅ Implemented |
+| Exponential backoff on pool init (3 retries) | ✅ Implemented |
+| Security filter (scanner/traversal blocking) | ✅ Implemented |
+| Machine identifier in logs (hostname + IP) | ✅ Implemented |
+| Request ID middleware (nanoid, `X-Request-Id`) | ✅ Implemented |
+| Response time tracking + slow detection | ✅ Implemented |
+| Clustering support (master/worker, configurable) | ✅ Implemented |
+| Advanced CORS (VPN, WFH, corporate, local) | ✅ Implemented |
+| Console manager (process title, ASCII art, daily clear) | ✅ Implemented |
+| Cache system (domain-agnostic, OOP, registry + key-builder + middleware) | ✅ Implemented in `src/middleware/cache/` |
+| Object pooling for high-frequency DB ops | ⬜ Optional, add if profiling indicates need |
+| Graceful batch processing (partial success) | ✅ Via `withBatchConnection` |
 
 ---
 
@@ -830,3 +698,1169 @@ registry.flushAll();
 - The `oracle-mongo-wrapper` query optimizer (Oracle hints) — not needed at this level
 - The overall CTE-chaining approach in `aggregatePipeline.js` — it works
 - The `withConnection` / `withTransaction` / `withBatchConnection` API surface — stable
+
+---
+
+---
+
+# Testing Guide — Server Quality Assurance
+
+> **Persona:** Senior software developer. Tests are not afterthoughts — they are
+> first-class deliverables. Every feature that ships without a test is a bug waiting
+> to be discovered in production.
+
+---
+
+## Test Directory Structure
+
+```
+test/server/
+├── setup.js                        # Global test setup: env loading, DB teardown helpers
+├── helpers/
+│   ├── request.js                  # Supertest app factory (creates a fresh app per suite)
+│   ├── auth.js                     # JWT token factory (sign tokens for any permission level)
+│   ├── db.js                       # Seed/teardown helpers for Oracle scratch tables
+│   └── fixtures/
+│       ├── users.fixture.js        # Standard user payloads
+│       └── responses.fixture.js    # Expected response shapes
+│
+├── unit/                           # Pure function / class tests — no DB, no HTTP
+│   ├── middleware/
+│   │   ├── rateLimiter.test.js
+│   │   ├── ipFilter.test.js
+│   │   ├── cors.test.js
+│   │   ├── csrf.test.js
+│   │   └── securityFilter.test.js
+│   ├── utils/
+│   │   ├── catchAsync.test.js
+│   │   ├── logger.test.js
+│   │   └── cacheKeyBuilder.test.js
+│   └── constants/
+│       ├── filterParser.test.js
+│       └── updateParser.test.js
+│
+├── integration/                    # HTTP-level tests against a real Express app instance
+│   ├── auth/
+│   │   ├── login.test.js
+│   │   ├── register.test.js
+│   │   ├── refresh.test.js
+│   │   └── logout.test.js
+│   ├── health.test.js
+│   ├── csrf.test.js
+│   └── error-handling.test.js
+│
+├── security/                       # Adversarial tests — what should be rejected
+│   ├── injection.test.js           # SQLi, path traversal, XSS payloads
+│   ├── auth-bypass.test.js         # Missing / forged / expired tokens
+│   ├── rate-limit.test.js          # Flood attack simulation
+│   ├── cors.test.js                # Disallowed origins
+│   ├── csrf.test.js                # Missing / replayed tokens
+│   └── headers.test.js             # Helmet header presence and values
+│
+├── performance/                    # Timing and throughput assertions
+│   ├── response-time.test.js       # P95 latency under normal load
+│   ├── concurrent.test.js          # Parallel request correctness
+│   └── pool.test.js                # DB pool exhaustion and recovery
+│
+└── reliability/                    # Fault-tolerance and recovery tests
+    ├── graceful-shutdown.test.js
+    ├── db-reconnect.test.js
+    └── unhandled-errors.test.js
+```
+
+---
+
+## Test Stack
+
+```
+mocha          — test runner (already a devDependency)
+chai           — assertions (already a devDependency)
+supertest      — HTTP integration testing against the Express app
+sinon          — spies, stubs, fakes (for isolating external dependencies)
+```
+
+Install the two additions:
+
+```bash
+npm install --save-dev supertest sinon
+```
+
+---
+
+## Running Tests
+
+```bash
+# All tests
+npx mocha 'test/**/*.test.js' --timeout 30000 --exit --recursive
+
+# Category by category
+npx mocha 'test/unit/**/*.test.js'         --timeout 10000 --exit
+npx mocha 'test/integration/**/*.test.js'  --timeout 30000 --exit
+npx mocha 'test/security/**/*.test.js'     --timeout 30000 --exit
+npx mocha 'test/performance/**/*.test.js'  --timeout 60000 --exit
+npx mocha 'test/reliability/**/*.test.js'  --timeout 60000 --exit
+```
+
+Add to `package.json`:
+
+```json
+"scripts": {
+  "test":              "mocha 'test/**/*.test.js' --timeout 30000 --exit --recursive",
+  "test:unit":         "mocha 'test/unit/**/*.test.js' --timeout 10000 --exit",
+  "test:integration":  "mocha 'test/integration/**/*.test.js' --timeout 30000 --exit",
+  "test:security":     "mocha 'test/security/**/*.test.js' --timeout 30000 --exit",
+  "test:performance":  "mocha 'test/performance/**/*.test.js' --timeout 60000 --exit",
+  "test:reliability":  "mocha 'test/reliability/**/*.test.js' --timeout 60000 --exit"
+}
+```
+
+---
+
+## 1. Unit Tests
+
+Unit tests verify individual classes and pure functions in complete isolation.
+No network, no DB, no filesystem. Fast — entire suite should complete in under 5 seconds.
+
+### Rules
+
+- Every middleware class gets its own unit test file.
+- Stub `req`, `res`, and `next` manually — do not use supertest here.
+- Never read from `.env` in unit tests — all configuration is passed via constructor options.
+- Test the unhappy path first, then the happy path.
+
+### Example — RateLimiterMiddleware
+
+```js
+// test/unit/middleware/rateLimiter.test.js
+'use strict';
+
+const { expect } = require('chai');
+const { RateLimiterMiddleware } = require('../../../src/middleware/security/RateLimiterMiddleware');
+
+function mockReq(ip = '127.0.0.1', path = '/api/v1/users') {
+    return { ip, path, method: 'GET', headers: {}, route: null };
+}
+
+function mockRes() {
+    const headers = {};
+    return {
+        headersSent: false,
+        setHeader(k, v) { headers[k] = v; },
+        getHeader(k) { return headers[k]; },
+        status(code) { this._status = code; return this; },
+        json(body) { this._body = body; return this; },
+        _headers: headers,
+    };
+}
+
+describe('RateLimiterMiddleware', function () {
+    describe('constructor validation', function () {
+        it('throws RangeError when max <= 0', function () {
+            expect(() => new RateLimiterMiddleware({ max: 0 })).to.throw(RangeError);
+            expect(() => new RateLimiterMiddleware({ max: -1 })).to.throw(RangeError);
+        });
+
+        it('throws RangeError when windowMs <= 0', function () {
+            expect(() => new RateLimiterMiddleware({ max: 10, windowMs: 0 })).to.throw(RangeError);
+        });
+
+        it('initializes with valid options', function () {
+            expect(() => new RateLimiterMiddleware({ max: 10, windowMs: 60000 })).to.not.throw();
+        });
+    });
+
+    describe('handle()', function () {
+        it('calls next() when under the limit', function (done) {
+            const limiter = new RateLimiterMiddleware({ max: 5, windowMs: 60000 });
+            const req = mockReq();
+            const res = mockRes();
+            limiter.handle(req, res, done);
+        });
+
+        it('responds 429 after exceeding max requests', function (done) {
+            const limiter = new RateLimiterMiddleware({ max: 2, windowMs: 60000 });
+            const req = mockReq('10.0.0.1');
+            const res = mockRes();
+            const noop = () => {};
+
+            limiter.handle(req, mockRes(), noop);
+            limiter.handle(req, mockRes(), noop);
+
+            limiter.handle(req, res, () => {
+                done(new Error('next() should not be called when limit is exceeded'));
+            });
+
+            setTimeout(() => {
+                expect(res._status).to.equal(429);
+                expect(res._body.status).to.equal('error');
+                done();
+            }, 10);
+        });
+
+        it('sets RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset headers', function (done) {
+            const limiter = new RateLimiterMiddleware({ max: 100, windowMs: 60000 });
+            const res = mockRes();
+            limiter.handle(mockReq(), res, () => {
+                expect(res._headers).to.have.property('RateLimit-Limit');
+                expect(res._headers).to.have.property('RateLimit-Remaining');
+                expect(res._headers).to.have.property('RateLimit-Reset');
+                done();
+            });
+        });
+
+        it('bypasses OPTIONS requests', function (done) {
+            const limiter = new RateLimiterMiddleware({ max: 1, windowMs: 60000 });
+            const req = { ...mockReq(), method: 'OPTIONS' };
+            limiter.handle(req, mockRes(), done);
+            limiter.handle(req, mockRes(), done); // second call must also pass
+        });
+
+        it('clears a specific key with clearKey()', function (done) {
+            const limiter = new RateLimiterMiddleware({ max: 1, windowMs: 60000 });
+            const req = mockReq('192.168.1.5');
+            limiter.handle(req, mockRes(), () => {});  // exhaust
+            limiter.clearKey('rl:ip:192.168.1.5');
+
+            // Should pass after clear
+            limiter.handle(req, mockRes(), done);
+        });
+    });
+
+    describe('getStats()', function () {
+        it('returns a NodeCache stats object', function () {
+            const limiter = new RateLimiterMiddleware({ max: 10, windowMs: 60000 });
+            const stats = limiter.getStats();
+            expect(stats).to.be.an('object');
+            expect(stats).to.have.property('hits');
+            expect(stats).to.have.property('misses');
+        });
+    });
+});
+```
+
+### Example — IpFilterMiddleware
+
+```js
+// test/unit/middleware/ipFilter.test.js
+'use strict';
+
+const { expect } = require('chai');
+const { IpFilterMiddleware } = require('../../../src/middleware/security/IpFilterMiddleware');
+
+describe('IpFilterMiddleware', function () {
+    describe('when disabled', function () {
+        it('always calls next()', function (done) {
+            const filter = new IpFilterMiddleware({ enabled: false });
+            filter.handle({ ip: '1.2.3.4', path: '/' }, {}, done);
+        });
+    });
+
+    describe('when enabled', function () {
+        it('allows an exact IP on the allowlist', function (done) {
+            const filter = new IpFilterMiddleware({
+                enabled: true,
+                allowedIps: ['192.168.1.10'],
+            });
+            filter.handle({ ip: '192.168.1.10', path: '/' }, {}, done);
+        });
+
+        it('blocks an IP not on the allowlist', function (done) {
+            const filter = new IpFilterMiddleware({
+                enabled: true,
+                allowedIps: ['192.168.1.10'],
+            });
+            const res = {
+                status(c) { this._status = c; return this; },
+                json(b)   { this._body = b; done(); },
+            };
+            filter.handle({ ip: '10.0.0.5', path: '/api' }, res, () => {
+                done(new Error('should have been blocked'));
+            });
+        });
+
+        it('allows an IP within a CIDR range', function (done) {
+            const filter = new IpFilterMiddleware({
+                enabled: true,
+                allowedIps: ['10.0.0.0/24'],
+            });
+            filter.handle({ ip: '10.0.0.99', path: '/' }, {}, done);
+        });
+
+        it('blocks an IP outside the CIDR range', function (done) {
+            const filter = new IpFilterMiddleware({
+                enabled: true,
+                allowedIps: ['10.0.0.0/24'],
+            });
+            const res = {
+                status(c) { this._status = c; return this; },
+                json()    { done(); },
+            };
+            filter.handle({ ip: '10.0.1.1', path: '/api' }, res, () => {
+                done(new Error('should have been blocked'));
+            });
+        });
+    });
+
+    describe('static helpers', function () {
+        it('ipInCidr correctly classifies IPs', function () {
+            expect(IpFilterMiddleware.ipInCidr('192.168.1.5', '192.168.1.0/24')).to.be.true;
+            expect(IpFilterMiddleware.ipInCidr('192.168.2.1', '192.168.1.0/24')).to.be.false;
+        });
+
+        it('extractClientIp strips ::ffff: IPv4-mapped prefix', function () {
+            const req = { ip: '::ffff:10.0.0.1', socket: {} };
+            expect(IpFilterMiddleware.extractClientIp(req)).to.equal('10.0.0.1');
+        });
+    });
+});
+```
+
+### Example — CacheKeyBuilder
+
+```js
+// test/unit/utils/cacheKeyBuilder.test.js
+'use strict';
+
+const { expect } = require('chai');
+const { CacheKeyBuilder } = require('../../../src/middleware/cache/CacheKeyBuilder');
+
+describe('CacheKeyBuilder', function () {
+    it('produces the same key regardless of parameter insertion order', function () {
+        const k1 = CacheKeyBuilder.build('users', { division: 'WH', year: 2025, month: 1 });
+        const k2 = CacheKeyBuilder.build('users', { month: 1, year: 2025, division: 'WH' });
+        expect(k1).to.equal(k2);
+    });
+
+    it('normalises null and undefined values to the string "null"', function () {
+        const k = CacheKeyBuilder.build('users', { division: null, year: undefined });
+        expect(k).to.include('division=null');
+        expect(k).to.include('year=null');
+    });
+
+    it('sorts array parameters before joining', function () {
+        const k1 = CacheKeyBuilder.build('ids', { ids: [3, 1, 2] });
+        const k2 = CacheKeyBuilder.build('ids', { ids: [2, 3, 1] });
+        expect(k1).to.equal(k2);
+    });
+
+    it('hashes keys longer than 200 characters', function () {
+        const longParams = {};
+        for (let i = 0; i < 30; i++) longParams[`param${i}`] = `value${i}`;
+        const key = CacheKeyBuilder.build('prefix', longParams);
+        expect(key.length).to.be.lessThan(220); // hashed — never obscenely long
+        expect(key).to.include('h=');
+    });
+
+    it('throws TypeError when prefix is empty', function () {
+        expect(() => new CacheKeyBuilder('')).to.throw(TypeError);
+        expect(() => new CacheKeyBuilder(null)).to.throw(TypeError);
+    });
+
+    it('fluent builder and static build() produce identical keys', function () {
+        const fluent = CacheKeyBuilder.of('report').param('year', 2025).param('month', 3).build();
+        const stat   = CacheKeyBuilder.build('report', { year: 2025, month: 3 });
+        expect(fluent).to.equal(stat);
+    });
+});
+```
+
+---
+
+## 2. Integration Tests
+
+Integration tests fire real HTTP requests against a live Express app instance
+(created fresh per file using `supertest`). They test the full middleware stack
+end-to-end: routing, validation, auth, response shape.
+
+### Setup Helper
+
+```js
+// test/helpers/request.js
+'use strict';
+
+const request = require('supertest');
+const app     = require('../../src/app');
+
+/**
+ * Returns a supertest agent bound to the app.
+ * Creates the app once per import — do not call multiple times.
+ */
+module.exports = request(app);
+```
+
+```js
+// test/helpers/auth.js
+'use strict';
+
+const jwt = require('jsonwebtoken');
+
+function signToken(payload = {}, expiresIn = '1h') {
+    return jwt.sign(
+        { sub: 'test-user', userLevel: 1, ...payload },
+        process.env.JWT_SECRET || 'test-secret',
+        { expiresIn },
+    );
+}
+
+module.exports = { signToken };
+```
+
+### Example — Health Route
+
+```js
+// test/integration/health.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('GET /api/v1/health', function () {
+    it('returns 200 with status "success"', async function () {
+        const res = await agent.get('/api/v1/health');
+        expect(res.status).to.equal(200);
+        expect(res.body.status).to.equal('success');
+    });
+
+    it('response body includes uptime, timestamp, environment, and host', async function () {
+        const res = await agent.get('/api/v1/health');
+        const { data } = res.body;
+        expect(data).to.have.property('uptime').that.is.a('number');
+        expect(data).to.have.property('timestamp');
+        expect(data).to.have.property('environment');
+        expect(data).to.have.property('host');
+    });
+
+    it('responds in under 500ms', async function () {
+        const start = Date.now();
+        await agent.get('/api/v1/health');
+        expect(Date.now() - start).to.be.lessThan(500);
+    });
+
+    it('sets X-Request-ID header on every response', async function () {
+        const res = await agent.get('/api/v1/health');
+        expect(res.headers).to.have.property('x-request-id');
+        expect(res.headers['x-request-id']).to.match(/^req_/);
+    });
+});
+```
+
+### Example — 404 and Error Shape
+
+```js
+// test/integration/error-handling.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('Error Handling', function () {
+    describe('404 — unknown routes', function () {
+        it('GET unknown path returns 404 JSON with error shape', async function () {
+            const res = await agent.get('/api/v1/does-not-exist');
+            expect(res.status).to.equal(404);
+            expect(res.body.status).to.equal('error');
+            expect(res.body.code).to.equal(404);
+            expect(res.body.error).to.have.property('type', 'NotFoundError');
+        });
+
+        it('POST unknown path returns 404 not 405', async function () {
+            const res = await agent.post('/api/v1/does-not-exist').send({});
+            expect(res.status).to.equal(404);
+        });
+    });
+
+    describe('global error shape contract', function () {
+        it('every error response has status, code, message, error fields', async function () {
+            const res = await agent.get('/api/v1/does-not-exist');
+            expect(res.body).to.have.all.keys('status', 'code', 'message', 'error');
+        });
+
+        it('error.type is always a string', async function () {
+            const res = await agent.get('/api/v1/does-not-exist');
+            expect(res.body.error.type).to.be.a('string');
+        });
+    });
+});
+```
+
+---
+
+## 3. Security Tests
+
+Security tests are adversarial. Their job is to prove that the server correctly
+**rejects** dangerous or unauthorized input. A passing security test means an
+attack was blocked.
+
+> **Rule:** A security test that never fails is worthless. Intentionally remove the
+> defense being tested, confirm the test fails, then restore the defense.
+
+### 3.1 Authentication & Authorization
+
+```js
+// test/security/auth-bypass.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+const { signToken } = require('../helpers/auth');
+
+// Replace with any route that requires AuthMiddleware.authenticate
+const PROTECTED = '/api/v1/users/me';
+
+describe('Auth Security', function () {
+    describe('missing token', function () {
+        it('returns 401 when no Authorization header is provided', async function () {
+            const res = await agent.get(PROTECTED);
+            expect(res.status).to.equal(401);
+            expect(res.body.error.type).to.equal('AuthenticationError');
+        });
+
+        it('returns 401 when Authorization header is malformed', async function () {
+            const res = await agent.get(PROTECTED).set('Authorization', 'NotBearer abc');
+            expect(res.status).to.equal(401);
+        });
+
+        it('returns 401 when token is present in neither header nor cookie', async function () {
+            const res = await agent.get(PROTECTED).unset('Authorization');
+            expect(res.status).to.equal(401);
+        });
+    });
+
+    describe('invalid token', function () {
+        it('returns 403 for a token signed with the wrong secret', async function () {
+            const forged = require('jsonwebtoken').sign({ sub: 'hacker' }, 'wrong-secret');
+            const res = await agent.get(PROTECTED).set('Authorization', `Bearer ${forged}`);
+            expect(res.status).to.equal(403);
+        });
+
+        it('returns 403 for an expired token', async function () {
+            const expired = signToken({ sub: 'test' }, '-1s');
+            const res = await agent.get(PROTECTED).set('Authorization', `Bearer ${expired}`);
+            expect(res.status).to.equal(403);
+        });
+
+        it('returns 403 for a structurally invalid JWT', async function () {
+            const res = await agent.get(PROTECTED).set('Authorization', 'Bearer not.a.jwt');
+            expect(res.status).to.equal(403);
+        });
+
+        it('returns 403 for a token with a tampered payload', async function () {
+            // Sign a valid token, then corrupt the payload segment
+            const valid = signToken({ userLevel: 1 });
+            const parts = valid.split('.');
+            parts[1] = Buffer.from(JSON.stringify({ sub: 'hacker', userLevel: 99 }))
+                .toString('base64url');
+            const tampered = parts.join('.');
+            const res = await agent.get(PROTECTED).set('Authorization', `Bearer ${tampered}`);
+            expect(res.status).to.equal(403);
+        });
+    });
+
+    describe('authorization (permission level)', function () {
+        it('returns 403 when user level is below route requirement', async function () {
+            // Route requires userLevel >= 2; token has userLevel 1
+            const token = signToken({ userLevel: 1 });
+            const res = await agent
+                .get('/api/v1/admin/dashboard')
+                .set('Authorization', `Bearer ${token}`);
+            expect(res.status).to.equal(403);
+            expect(res.body.error.type).to.equal('AuthorizationError');
+        });
+    });
+});
+```
+
+### 3.2 HTTP Headers (Helmet)
+
+```js
+// test/security/headers.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('Security Headers (Helmet)', function () {
+    let headers;
+
+    before(async function () {
+        const res = await agent.get('/api/v1/health');
+        headers = res.headers;
+    });
+
+    it('sets X-Content-Type-Options: nosniff', function () {
+        expect(headers['x-content-type-options']).to.equal('nosniff');
+    });
+
+    it('sets X-Frame-Options to deny framing', function () {
+        expect(headers['x-frame-options']).to.equal('DENY');
+    });
+
+    it('sets Strict-Transport-Security', function () {
+        expect(headers['strict-transport-security']).to.exist;
+        expect(headers['strict-transport-security']).to.include('max-age=');
+    });
+
+    it('sets Content-Security-Policy', function () {
+        expect(headers['content-security-policy']).to.exist;
+        expect(headers['content-security-policy']).to.include("default-src 'self'");
+    });
+
+    it('does not expose X-Powered-By', function () {
+        expect(headers).to.not.have.property('x-powered-by');
+    });
+
+    it('sets Referrer-Policy', function () {
+        expect(headers['referrer-policy']).to.exist;
+    });
+
+    it('sets Cross-Origin-Opener-Policy', function () {
+        expect(headers['cross-origin-opener-policy']).to.exist;
+    });
+});
+```
+
+### 3.3 Injection Attacks
+
+```js
+// test/security/injection.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+// Payloads that should never reach the DB or be reflected in a 500
+const SQL_PAYLOADS = [
+    "'; DROP TABLE USERS; --",
+    "' OR '1'='1",
+    "' OR 1=1--",
+    "admin'--",
+    "1; SELECT * FROM information_schema.tables",
+];
+
+const PATH_TRAVERSAL_PAYLOADS = [
+    '../../../etc/passwd',
+    '..\\..\\..\\windows\\system32',
+    '%2e%2e%2f%2e%2e%2f',
+    '....//....//etc/passwd',
+];
+
+const XSS_PAYLOADS = [
+    '<script>alert(1)</script>',
+    '"><img src=x onerror=alert(1)>',
+    'javascript:alert(1)',
+];
+
+describe('Injection Attack Mitigation', function () {
+    describe('SQL injection via query string', function () {
+        SQL_PAYLOADS.forEach((payload) => {
+            it(`rejects or sanitizes: ${payload.slice(0, 40)}`, async function () {
+                const res = await agent
+                    .get('/api/v1/users')
+                    .query({ search: payload });
+                // Must not crash the server with a 500
+                expect(res.status).to.not.equal(500);
+            });
+        });
+    });
+
+    describe('SQL injection via request body', function () {
+        SQL_PAYLOADS.forEach((payload) => {
+            it(`body payload blocked: ${payload.slice(0, 40)}`, async function () {
+                const res = await agent
+                    .post('/api/v1/auth/login')
+                    .send({ username: payload, password: 'test' });
+                expect(res.status).to.not.equal(500);
+            });
+        });
+    });
+
+    describe('path traversal via URL', function () {
+        PATH_TRAVERSAL_PAYLOADS.forEach((payload) => {
+            it(`path traversal blocked: ${payload}`, async function () {
+                const res = await agent.get(`/api/v1/${encodeURIComponent(payload)}`);
+                // Security filter should return 400, 403, or 404 — never 200
+                expect([400, 403, 404]).to.include(res.status);
+            });
+        });
+    });
+
+    describe('XSS via query parameters', function () {
+        XSS_PAYLOADS.forEach((payload) => {
+            it(`XSS payload not reflected: ${payload.slice(0, 40)}`, async function () {
+                const res = await agent.get('/api/v1/search').query({ q: payload });
+                // Response body must never echo the script tag verbatim
+                expect(JSON.stringify(res.body)).to.not.include('<script>');
+                expect(JSON.stringify(res.body)).to.not.include('onerror=');
+            });
+        });
+    });
+});
+```
+
+### 3.4 CSRF Protection
+
+```js
+// test/security/csrf.test.js
+'use strict';
+
+const { expect } = require('chai');
+const request    = require('supertest');
+const app        = require('../../src/app');
+
+describe('CSRF Protection', function () {
+    let agent;
+
+    beforeEach(function () {
+        // Use a persistent agent so cookies are retained between requests
+        agent = request.agent(app);
+    });
+
+    it('GET /api/v1/csrf/token returns a token and sets cookie', async function () {
+        const res = await agent.get('/api/v1/csrf/token');
+        expect(res.status).to.equal(200);
+        expect(res.body).to.have.property('token').that.is.a('string');
+        // Cookie must be set
+        const cookies = res.headers['set-cookie'] || [];
+        expect(cookies.some(c => c.includes('csrf'))).to.be.true;
+    });
+
+    it('POST without CSRF token returns 403', async function () {
+        // First get a session so CSRF cookie is set, then attempt mutation without token
+        await agent.get('/api/v1/csrf/token');
+        const res = await agent
+            .post('/api/v1/auth/login')
+            .send({ username: 'test', password: 'test' });
+        expect(res.status).to.equal(403);
+        expect(res.body.code).to.equal('CSRF_TOKEN_INVALID');
+    });
+
+    it('POST with valid CSRF token is accepted (not blocked by CSRF)', async function () {
+        const tokenRes = await agent.get('/api/v1/csrf/token');
+        const csrfToken = tokenRes.body.token;
+
+        const res = await agent
+            .post('/api/v1/auth/login')
+            .set('x-csrf-token', csrfToken)
+            .send({ username: 'nonexistent', password: 'wrong' });
+
+        // May be 400/401 due to bad credentials — but must NOT be 403 CSRF error
+        expect(res.status).to.not.equal(403);
+    });
+
+    it('POST with a forged CSRF token returns 403', async function () {
+        await agent.get('/api/v1/csrf/token');
+        const res = await agent
+            .post('/api/v1/auth/login')
+            .set('x-csrf-token', 'forged-token-abc123')
+            .send({ username: 'test', password: 'test' });
+        expect(res.status).to.equal(403);
+    });
+
+    it('GET /csrf/status describes protection configuration', async function () {
+        const res = await agent.get('/api/v1/csrf/status');
+        expect(res.status).to.equal(200);
+        expect(res.body.status.enabled).to.be.true;
+        expect(res.body.status.methods.protected).to.include('POST');
+        expect(res.body.status.methods.safe).to.include('GET');
+    });
+});
+```
+
+### 3.5 Rate Limiting (Flood Attack)
+
+```js
+// test/security/rate-limit.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('Rate Limiting', function () {
+    it('returns 429 after exceeding the configured limit from a single IP', async function () {
+        // authRateLimiter is set to max: 10 per 15 minutes
+        // We fire 15 requests and expect at least one 429
+        const responses = await Promise.all(
+            Array.from({ length: 15 }, () =>
+                agent.post('/api/v1/auth/login').send({ username: 'x', password: 'x' }),
+            ),
+        );
+        const tooMany = responses.filter((r) => r.status === 429);
+        expect(tooMany.length).to.be.greaterThan(0);
+    });
+
+    it('429 response includes Retry-After header', async function () {
+        const res = responses.find((r) => r.status === 429);
+        if (res) expect(res.headers).to.have.property('retry-after');
+    });
+
+    it('RateLimit-Policy header is present on every response', async function () {
+        const res = await agent.get('/api/v1/health');
+        expect(res.headers).to.have.property('ratelimit-policy');
+    });
+
+    it('RateLimit-Remaining decreases with each request', async function () {
+        const r1 = await agent.get('/api/v1/health');
+        const r2 = await agent.get('/api/v1/health');
+        const rem1 = parseInt(r1.headers['ratelimit-remaining'], 10);
+        const rem2 = parseInt(r2.headers['ratelimit-remaining'], 10);
+        expect(rem2).to.be.lessThanOrEqual(rem1);
+    });
+});
+```
+
+### 3.6 CORS
+
+```js
+// test/security/cors.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('CORS Policy', function () {
+    it('allows requests from an explicitly allowed origin', async function () {
+        const res = await agent
+            .get('/api/v1/health')
+            .set('Origin', 'http://localhost:3000');
+        expect(res.headers['access-control-allow-origin']).to.equal('http://localhost:3000');
+    });
+
+    it('allows requests from a private network IP', async function () {
+        const res = await agent
+            .get('/api/v1/health')
+            .set('Origin', 'http://192.168.1.100:3000');
+        expect(res.headers['access-control-allow-origin']).to.exist;
+    });
+
+    it('blocks requests from a random public origin', async function () {
+        const res = await agent
+            .get('/api/v1/health')
+            .set('Origin', 'https://evil.hacker.com');
+        // Must not echo back the disallowed origin
+        expect(res.headers['access-control-allow-origin']).to.not.equal('https://evil.hacker.com');
+    });
+
+    it('responds to preflight OPTIONS with correct CORS headers', async function () {
+        const res = await agent
+            .options('/api/v1/health')
+            .set('Origin', 'http://localhost:3000')
+            .set('Access-Control-Request-Method', 'GET')
+            .set('Access-Control-Request-Headers', 'Authorization');
+        expect(res.status).to.equal(200);
+        expect(res.headers['access-control-allow-methods']).to.exist;
+    });
+
+    it('exposes X-Request-ID and X-Response-Time in Access-Control-Expose-Headers', async function () {
+        const res = await agent
+            .get('/api/v1/health')
+            .set('Origin', 'http://localhost:3000');
+        const exposed = res.headers['access-control-expose-headers'] || '';
+        expect(exposed.toLowerCase()).to.include('x-request-id');
+    });
+});
+```
+
+### 3.7 Scanner / Path Traversal Blocking
+
+```js
+// test/security/scanner-blocking.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+const SCANNER_PATHS = [
+    '/robots.txt',
+    '/.env',
+    '/wp-admin',
+    '/phpinfo.php',
+    '/admin.php',
+    '/login.jsp',
+    '/../etc/passwd',
+    '/weblogic/login',
+    '/_layouts/15/error.aspx',
+];
+
+const BLOCKED_METHODS = ['TRACE', 'TRACK', 'PROPFIND'];
+
+describe('Security Filter — Scanner & Traversal Blocking', function () {
+    SCANNER_PATHS.forEach((path) => {
+        it(`blocks scanner path: ${path}`, async function () {
+            const res = await agent.get(path);
+            // Must return 400, 403, or 404 — never 200
+            expect([400, 403, 404, 405]).to.include(res.status);
+        });
+    });
+
+    BLOCKED_METHODS.forEach((method) => {
+        it(`blocks HTTP method: ${method}`, async function () {
+            const res = await agent[method.toLowerCase()]?.('/api/v1/health')
+                || await agent.options('/api/v1/health').set('X-Method-Override', method);
+            // Security filter should not allow through
+            expect([400, 403, 404, 405]).to.include(res.status);
+        });
+    });
+});
+```
+
+---
+
+## 4. Performance Tests
+
+Performance tests assert timing guarantees. They do not replace load-testing tools
+(k6, wrk) but give fast in-process feedback on regression.
+
+### Rules
+
+- Use `process.hrtime.bigint()` for sub-millisecond timing.
+- Each timing assertion must have a documented budget and justification.
+- A test environment with a cold DB pool is not a fair benchmark — warm the pool in `before()`.
+
+```js
+// test/performance/response-time.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+// Warm the pool before running timing assertions
+before(async function () {
+    this.timeout(15_000);
+    await agent.get('/api/v1/health');
+});
+
+describe('Response Time Budgets', function () {
+    describe('GET /api/v1/health', function () {
+        it('p50 (median of 20 runs) is under 50ms', async function () {
+            const times = [];
+            for (let i = 0; i < 20; i++) {
+                const start = process.hrtime.bigint();
+                await agent.get('/api/v1/health');
+                times.push(Number(process.hrtime.bigint() - start) / 1e6);
+            }
+            times.sort((a, b) => a - b);
+            const p50 = times[Math.floor(times.length * 0.5)];
+            expect(p50).to.be.lessThan(50);
+        });
+
+        it('p95 (95th percentile of 20 runs) is under 200ms', async function () {
+            const times = [];
+            for (let i = 0; i < 20; i++) {
+                const start = process.hrtime.bigint();
+                await agent.get('/api/v1/health');
+                times.push(Number(process.hrtime.bigint() - start) / 1e6);
+            }
+            times.sort((a, b) => a - b);
+            const p95 = times[Math.floor(times.length * 0.95)];
+            expect(p95).to.be.lessThan(200);
+        });
+
+        it('X-Response-Time header is present and numeric', async function () {
+            const res = await agent.get('/api/v1/health');
+            const rt = res.headers['x-response-time'];
+            expect(rt).to.match(/^\d+ms$/);
+            expect(parseInt(rt, 10)).to.be.a('number');
+        });
+    });
+});
+```
+
+```js
+// test/performance/concurrent.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('Concurrent Request Correctness', function () {
+    it('handles 50 concurrent health checks without error', async function () {
+        const results = await Promise.all(
+            Array.from({ length: 50 }, () => agent.get('/api/v1/health')),
+        );
+        const errors = results.filter((r) => r.status >= 500);
+        expect(errors.length).to.equal(0);
+    });
+
+    it('every concurrent response has a unique X-Request-ID', async function () {
+        const results = await Promise.all(
+            Array.from({ length: 20 }, () => agent.get('/api/v1/health')),
+        );
+        const ids = results.map((r) => r.headers['x-request-id']);
+        const unique = new Set(ids);
+        expect(unique.size).to.equal(20);
+    });
+
+    it('50 concurrent POSTs to login all receive a valid JSON error (not crash)', async function () {
+        const results = await Promise.all(
+            Array.from({ length: 50 }, () =>
+                agent.post('/api/v1/auth/login').send({ username: 'x', password: 'x' }),
+            ),
+        );
+        const crashes = results.filter((r) => r.status >= 500);
+        expect(crashes.length).to.equal(0);
+    });
+});
+```
+
+---
+
+## 5. Reliability Tests
+
+Reliability tests verify graceful degradation, recovery from transient failures,
+and correct process lifecycle behavior.
+
+```js
+// test/reliability/unhandled-errors.test.js
+'use strict';
+
+const { expect } = require('chai');
+const agent      = require('../helpers/request');
+
+describe('Unhandled Error Protection', function () {
+    it('synchronous errors in routes are caught and return 500 JSON', async function () {
+        // If the app exposes a deliberate throw-test route in non-production
+        const res = await agent.get('/api/v1/health');
+        // In normal operation, the server must never crash on a single bad request
+        expect(res.status).to.be.lessThan(600);
+        expect(res.headers['content-type']).to.include('application/json');
+    });
+
+    it('sending a malformed JSON body returns 400 not 500', async function () {
+        const res = await agent
+            .post('/api/v1/auth/login')
+            .set('Content-Type', 'application/json')
+            .send('{invalid json}');
+        expect(res.status).to.equal(400);
+        expect(res.body.status).to.equal('error');
+    });
+
+    it('sending an oversized body returns 413 not 500', async function () {
+        const huge = Buffer.alloc(11 * 1024 * 1024, 'x').toString(); // 11 MB > 10MB limit
+        const res = await agent
+            .post('/api/v1/auth/login')
+            .set('Content-Type', 'application/json')
+            .send(JSON.stringify({ data: huge }));
+        expect(res.status).to.equal(413);
+    });
+});
+```
+
+---
+
+## 6. Test Coverage Standards
+
+| Category | Minimum Coverage | Rationale |
+|---|---|---|
+| Middleware classes | 90% branch coverage | Every `if` in a security gate must be tested on both sides |
+| Service classes | 85% branch coverage | Business logic dictates correctness |
+| Controllers | 80% line coverage | Thin layer — mostly delegation |
+| Utils / helpers | 95% line coverage | Pure functions are cheap to test exhaustively |
+| Constants / messages | 100% export coverage | Verify nothing is accidentally undefined |
+
+---
+
+## 7. What to Test on Every New Route
+
+When adding a new route, the following tests are **mandatory before merge**:
+
+```
+✅  Happy path — correct input, correct output, correct HTTP status
+✅  Missing required fields — returns 400 with details array
+✅  Invalid field types — returns 400 with field-level hints
+✅  Unauthenticated request — returns 401
+✅  Authenticated but unauthorized (wrong level/area) — returns 403
+✅  Request body too large — returns 413
+✅  Response shape matches { status, code, message, data } contract
+✅  X-Request-ID is present in the response
+✅  Response time under 500ms (hot path)
+✅  Route is not accessible via scanner paths (if under /api/)
+```
+
+---
+
+## 8. CI Pipeline Integration
+
+Add to `.github/workflows/ci.yml`:
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-secret
+          CSRF_SECRET: ci-csrf-secret
+
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-secret
+          CSRF_SECRET: ci-csrf-secret
+          PORT: 4000
+
+      - name: Run security tests
+        run: npm run test:security
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-secret
+          CSRF_SECRET: ci-csrf-secret
+          PORT: 4001
+
+      - name: Run performance tests
+        run: npm run test:performance
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-secret
+          PORT: 4002
+```
+
+---
+
+## 9. Testing Principles (Non-Negotiable)
+
+These rules apply to every test in this codebase regardless of category.
+
+**Tests are deterministic.** A test that passes on one run and fails on another is
+not a test — it is a liability. Eliminate time-dependent assertions, shared mutable
+state across test files, and reliance on network availability in unit tests.
+
+**Tests are independent.** No test depends on the side-effects of another test.
+If test B only passes because test A inserted a row, that is a design flaw.
+Use `before`/`after` hooks to set up and tear down state per-suite.
+
+**Tests document intent.** The test description is the specification. Write it in
+plain English that a non-developer can read: `"returns 403 when user level is below
+route requirement"` — not `"test auth 2"`.
+
+**Tests catch regressions, not just greenfield bugs.** Every bug fixed in production
+gets a regression test. The test description includes the ticket or PR number.
+
+**Never mock what you own.** Stub external services (Oracle, SMTP, third-party APIs)
+but never stub your own middleware, services, or utilities in integration tests.
+If it is your code, test the real thing.
+
+**Security tests are permanently adversarial.** Never skip a security test because
+it is "inconvenient." A skipped security test is a documented vulnerability.

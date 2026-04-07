@@ -19,10 +19,16 @@ class CsrfMiddleware {
             (process.env.NODE_ENV === "production" &&
                 process.env.USE_HTTPS === "true");
 
-        this._secret =
-            options.secret ??
-            process.env.CSRF_SECRET ??
-            "your-csrf-secret-key-here-change-in-production";
+        this._secret = options.secret ?? process.env.CSRF_SECRET;
+
+        if (!this._secret) {
+            if (process.env.NODE_ENV === "production") {
+                throw new Error(
+                    "CSRF_SECRET environment variable is required in production",
+                );
+            }
+            this._secret = "dev-csrf-secret-do-not-use-in-production";
+        }
 
         const { generateCsrfToken, doubleCsrfProtection } = doubleCsrf({
             getSecret: () => this._secret,
