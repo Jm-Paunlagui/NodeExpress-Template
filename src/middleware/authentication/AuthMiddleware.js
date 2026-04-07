@@ -18,14 +18,34 @@ class AuthMiddleware {
      * Attaches decoded user payload to `req.user`.
      */
     static authenticate(req, res, next) {
+        AuthMiddleware._doAuthenticate(req, res, next, false);
+    }
+
+    /**
+     * Same as authenticate but returns user-friendly HTML errors instead of JSON.
+     * Use this on routes that serve file downloads (export, download endpoints).
+     *
+     * The file-download flag is server-controlled (chosen at route definition),
+     * not derived from user-supplied paths or headers (CWE-807).
+     *
+     * @example
+     * router.get('/report/export/:id',
+     *     AuthMiddleware.authenticateForDownload,
+     *     ReportController.export,
+     * );
+     */
+    static authenticateForDownload(req, res, next) {
+        AuthMiddleware._doAuthenticate(req, res, next, true);
+    }
+
+    /**
+     * Shared authentication logic.
+     * @param {boolean} isFileDownload - Server-controlled flag; never derived from user input.
+     * @private
+     */
+    static _doAuthenticate(req, res, next, isFileDownload) {
         const token =
             req.cookies?.token || req.headers["authorization"]?.split(" ")[1];
-
-        const isFileDownload =
-            req.path.includes("/export/") ||
-            req.path.includes("/download/") ||
-            (req.headers.accept &&
-                req.headers.accept.includes("application/vnd.openxmlformats"));
 
         if (!token) {
             if (isFileDownload) {
