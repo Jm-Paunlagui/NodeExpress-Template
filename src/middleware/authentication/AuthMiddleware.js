@@ -82,6 +82,12 @@ class AuthMiddleware {
 
                     res.setHeader("Content-Type", "text/html; charset=utf-8");
                     res.setHeader("Content-Disposition", "inline");
+                    
+                    logger.warn(
+                        `{title} - ${line1} ${line2}`,
+                    );
+
+
                     return res
                         .status(statusCode)
                         .send(

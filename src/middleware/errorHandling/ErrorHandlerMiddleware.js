@@ -8,6 +8,7 @@
 
 const { logger } = require("../../utils/logger");
 const { AppError } = require("../../constants/errors");
+const { path } = require("pdfkit");
 
 class ErrorHandlerMiddleware {
     constructor() {
@@ -21,14 +22,21 @@ class ErrorHandlerMiddleware {
         const isOperational = err.isOperational || false;
 
         if (statusCode >= 500) {
-            logger.error(err.message, {
-                statusCode,
-                stack: err.stack,
-                path: req.originalUrl,
-                method: req.method,
-                ip: req.ip,
-                requestId: req.id,
-            });
+            logger.error(
+                AppError(
+                    err.message,
+                    statusCode,
+                    false,
+                    {
+                        stack: err.stack,
+                        path: req.originalUrl,
+                        method: req.method,
+                        ip: req.ip,
+                        requestId: req.id,
+                    },
+                    "Unexpected error occurred",
+                ),
+            );
         } else {
             logger.warn(err.message, {
                 statusCode,
