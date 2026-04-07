@@ -34,29 +34,6 @@ const SAPBook = {
     ],
 };
 
-const StorageLocation = {
-    table: "INV_LOCATION",
-    columns: [
-        "ID",
-        "DIVISION",
-        "YEAR",
-        "MONTH",
-        "SLOC",
-        "PSA",
-        "TERMINAL",
-        "TYPE",
-        "TOTAL_TAG_GENERATED",
-        "CREATEDBY",
-        "MODIFIEDBY",
-        "DELETEDBY",
-        "CREATEDDATE",
-        "MODIFIEDDATE",
-        "DELETEDDATE",
-        "REASON",
-        "ACTION",
-    ],
-};
-
 const UnlockedInventoryByMonth = {
     table: "INV_LOCK",
     columns: ["ID", "MONTH", "LAST_CHANGE_BY", "AUTO_GR", "ACTIVE"],
@@ -103,35 +80,6 @@ const InventoryStocks = {
         "USERNAME",
         "GR_SU",
         "PACKAGE_ID",
-        "CREATEDBY",
-        "MODIFIEDBY",
-        "DELETEDBY",
-        "CREATEDDATE",
-        "MODIFIEDDATE",
-        "DELETEDDATE",
-        "REASON",
-        "ACTION",
-    ],
-};
-
-const InventoryUnit = {
-    table: "INV_UNIT",
-    columns: [
-        "ID",
-        "DIVISION",
-        "YEAR",
-        "MONTH",
-        "BATCHID",
-        "UNITID",
-        "UNITIDTYPE",
-        "UNITSTATUS",
-        "LOCATION",
-        "ORDERNAME",
-        "MATERIALNUMBER",
-        "CURRENTOPERATION",
-        "ITEMSPASSED",
-        "ITEMSFAILED",
-        "ITEMSSCRAP",
         "CREATEDBY",
         "MODIFIEDBY",
         "DELETEDBY",

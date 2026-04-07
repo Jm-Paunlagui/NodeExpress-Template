@@ -562,12 +562,12 @@ describe("9. filterParser — Unit Tests", function () {
     });
 
     it("9.3 $gt operator", function () {
-        const { whereClause, binds } = parseFilter({ AGE: { $gt: 18 } });
+        const { whereClause } = parseFilter({ AGE: { $gt: 18 } });
         expect(whereClause).to.include(">");
     });
 
     it("9.4 $in operator", function () {
-        const { whereClause, binds } = parseFilter({
+        const { whereClause } = parseFilter({
             STATUS: { $in: ["a", "b"] },
         });
         expect(whereClause).to.include("IN");
@@ -675,7 +675,7 @@ describe("10. updateParser — Unit Tests", function () {
     });
 
     it("10.10 combined $set + $inc", function () {
-        const { setClause, binds } = parseUpdate({
+        const { setClause } = parseUpdate({
             $set: { STATUS: "premium" },
             $inc: { LOGIN_COUNT: 1 },
         });
