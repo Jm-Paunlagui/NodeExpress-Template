@@ -40,54 +40,69 @@ class AuthMiddleware {
 
     /**
      * Shared authentication logic.
+     *
+     * Security: the token is read from `req.signedCookies` (HMAC-verified by
+     * cookie-parser using COOKIE_SECRET) or the Authorization header.  The sole
+     * security decision is made by `jwt.verify()` — a server-controlled
+     * cryptographic check — so no branch depends on raw user-controlled data
+     * (CWE-807 / CodeQL js/user-controlled-bypass).
+     *
      * @param {boolean} isFileDownload - Server-controlled flag; never derived from user input.
      * @private
      */
     static _doAuthenticate(req, res, next, isFileDownload) {
+        // Authorization header takes precedence (standard convention).
+        // signedCookies are HMAC-verified by cookie-parser (server-controlled).
+        // Both sources are validated by jwt.verify below.
         const token =
-            req.cookies?.token || req.headers["authorization"]?.split(" ")[1];
+            req.headers["authorization"]?.split(" ")[1] ||
+            req.signedCookies?.token ||
+            "";
 
-        if (!token) {
-            if (isFileDownload) {
-                res.setHeader("Content-Type", "text/html; charset=utf-8");
-                res.setHeader("Content-Disposition", "inline");
-                return res
-                    .status(401)
-                    .send(
-                        AuthMiddleware._authHtmlError(
-                            "Authentication Required",
-                            "You need to be logged in to download this file.",
-                            "Please log in and try again.",
-                        ),
-                    );
-            }
-            return next(
-                new AppError(AUTH_ERRORS.USER_NOT_FOUND, 401, {
-                    type: "AuthenticationError",
-                    hint: "Provide a valid token.",
-                }),
-            );
-        }
-
+        // jwt.verify handles missing (""), malformed, expired, and forged
+        // tokens uniformly — the security decision is always server-controlled.
         jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
             if (err) {
+                // JsonWebTokenError  → missing / malformed → 401
+                // TokenExpiredError  → expired             → 403
+                // NotBeforeError     → used too early      → 403
+                const isMissing = err.name === "JsonWebTokenError";
+                const statusCode = isMissing ? 401 : 403;
+
                 if (isFileDownload) {
+                    const title = isMissing
+                        ? "Authentication Required"
+                        : "Access Denied";
+                    const line1 = isMissing
+                        ? "You need to be logged in to download this file."
+                        : "Your authentication token is invalid or has expired.";
+                    const line2 = isMissing
+                        ? "Please log in and try again."
+                        : "Please log in again and try downloading the file.";
+
                     res.setHeader("Content-Type", "text/html; charset=utf-8");
                     res.setHeader("Content-Disposition", "inline");
                     return res
-                        .status(403)
+                        .status(statusCode)
                         .send(
-                            AuthMiddleware._authHtmlError(
-                                "Access Denied",
-                                "Your authentication token is invalid or has expired.",
-                                "Please log in again and try downloading the file.",
-                            ),
+                            AuthMiddleware._authHtmlError(title, line1, line2),
                         );
                 }
+
+                const errorMsg = isMissing
+                    ? AUTH_ERRORS.USER_NOT_FOUND
+                    : AUTH_ERRORS.FORBIDDEN_ACCESS;
+                const errorType = isMissing
+                    ? "AuthenticationError"
+                    : "AuthenticationError";
+                const hint = isMissing
+                    ? "Provide a valid token."
+                    : "Token invalid or expired.";
+
                 return next(
-                    new AppError(AUTH_ERRORS.FORBIDDEN_ACCESS, 403, {
-                        type: "AuthenticationError",
-                        hint: "Token invalid or expired.",
+                    new AppError(errorMsg, statusCode, {
+                        type: errorType,
+                        hint,
                     }),
                 );
             }
