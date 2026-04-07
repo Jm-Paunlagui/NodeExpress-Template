@@ -33,14 +33,10 @@ const {
     OracleSchema,
 } = require("../../src/utils/oracle-mongo-wrapper/schema/OracleSchema");
 const {
-    OracleDCL,
-} = require("../../src/utils/oracle-mongo-wrapper/schema/OracleDCL");
-const {
     Transaction,
 } = require("../../src/utils/oracle-mongo-wrapper/Transaction");
 const {
     withCTE,
-    withRecursiveCTE,
 } = require("../../src/utils/oracle-mongo-wrapper/pipeline/cteBuilder");
 const {
     createPerformance,
@@ -143,15 +139,6 @@ const report = {
     failed: 0,
     failures: [],
 };
-
-function logCategory(category, testName, status, detail = "") {
-    if (!report.categories[category]) {
-        report.categories[category] = { tests: [], passed: 0, failed: 0 };
-    }
-    report.categories[category].tests.push({ testName, status, detail });
-    if (status === "PASS") report.categories[category].passed++;
-    else report.categories[category].failed++;
-}
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 async function tableExists(db, tableName) {
@@ -421,7 +408,7 @@ describe("2. filterParser — Unit Tests", function () {
     });
 
     it("2.23 multiple fields (implicit AND)", function () {
-        const { whereClause, binds } = parseFilter({ DIVISION: "WH", YEAR: "2025", MONTH: "01" });
+        const { binds } = parseFilter({ DIVISION: "WH", YEAR: "2025", MONTH: "01" });
         expect(Object.keys(binds).length).to.equal(3);
     });
 

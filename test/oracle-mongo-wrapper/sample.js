@@ -148,14 +148,12 @@ const inventoryDB = createDb("unitInventory");
 
 // ─── Collection handles ───────────────────────────────────────────────────────
 const devBook = new OracleCollection(SAPBook.table, inventoryDB);
-const devLocation = new OracleCollection(StorageLocation.table, inventoryDB);
 const devLock = new OracleCollection(
     UnlockedInventoryByMonth.table,
     inventoryDB,
 );
 const devMaterial = new OracleCollection(MaterialMaster.table, inventoryDB);
 const devStocks = new OracleCollection(InventoryStocks.table, inventoryDB);
-const devUnit = new OracleCollection(InventoryUnit.table, inventoryDB);
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 const NUM = (v) => (v == null ? 0 : Number(v));

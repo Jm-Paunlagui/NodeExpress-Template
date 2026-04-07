@@ -148,7 +148,6 @@ describe("1. Connection & Health", function () {
         const result = await db.withConnection(async (conn) => {
             const r = await conn.execute(
                 "SELECT 1 AS VAL FROM DUAL",
-                {},
                 { outFormat: db.oracledb.OUT_FORMAT_OBJECT },
             );
             return r.rows[0].VAL;
