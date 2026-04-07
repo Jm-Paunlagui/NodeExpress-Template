@@ -45,7 +45,7 @@
         "morgan": "^1.10.1",
         "nanoid": "^5.1.7",
         "node-cache": "^5.1.2",
-        "nodemailer": "^8.0.4",
+        "nodemailer": "^8.0.5",
         "oracledb": "^6.10.0",
         "pdfkit": "^0.18.0",
         "uuid": "^13.0.0"
