@@ -47,7 +47,9 @@ class Logger {
         CURRENT_LEVEL: process.env.LOG_LEVEL || "INFO",
 
         CONSOLE_OUTPUT:
-            process.env.ENABLE_CONSOLE_LOGS === "true" ||
+            process.env.ENABLE_CONSOLE_LOGS === "false"
+                ? false
+                : process.env.ENABLE_CONSOLE_LOGS === "true" ||
             process.env.NODE_ENV !== "production" ||
             process.env.DOCKER_CONTAINER === "true",
 
