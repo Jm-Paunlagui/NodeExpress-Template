@@ -27,7 +27,7 @@
         "test:summary": "mocha --file test/server/setup.js \"test/server/**/*.test.js\" --timeout 30000 --exit --recursive --reporter min"
     },
     "dependencies": {
-        "axios": "^1.14.0",
+        "axios": "^1.15.0",
         "bcryptjs": "^3.0.3",
         "blob-stream": "^0.1.3",
         "body-parser": "^2.2.2",
