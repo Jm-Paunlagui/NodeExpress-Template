@@ -4,8 +4,8 @@
  *
  * This module abstracts away the hashing algorithm, allowing for easy switching
  * between different hashing strategies if needed.
-    * Security: bcrypt is a well-established password hashing function that incorporates
-    * salting and multiple rounds of hashing, making it resistant to brute-force attacks.
+ * Security: bcrypt is a well-established password hashing function that incorporates
+ * salting and multiple rounds of hashing, making it resistant to brute-force attacks.
  *
  * @author Jm-Paunlagui
  * @version 1.0
@@ -15,6 +15,7 @@
 "use strict";
 
 const bcrypt = require("bcrypt");
+const { logger } = require("../logger");
 
 // --- Constants ---
 const MIN_SALT_ROUNDS = 10;
@@ -32,7 +33,7 @@ const resolveSaltRounds = () => {
 
     if (isNaN(parsed) || parsed < MIN_SALT_ROUNDS || parsed > MAX_SALT_ROUNDS) {
         throw new RangeError(
-            `BCRYPT_SALT_ROUNDS must be between ${MIN_SALT_ROUNDS} and ${MAX_SALT_ROUNDS}. Got: "${raw}"`
+            `BCRYPT_SALT_ROUNDS must be between ${MIN_SALT_ROUNDS} and ${MAX_SALT_ROUNDS}. Got: "${raw}"`,
         );
     }
 
@@ -58,7 +59,7 @@ class BCryptAdapter {
         try {
             return await bcrypt.hash(password, SALT_ROUNDS);
         } catch (err) {
-            console.error("[BCryptAdapter] Hashing error:", err);
+            logger.error("[BCryptAdapter] Hashing error:", err);
             throw new Error("Password hashing failed.");
         }
     }
@@ -84,7 +85,7 @@ class BCryptAdapter {
         try {
             return await bcrypt.compare(password, hashedPassword);
         } catch (err) {
-            console.error("[BCryptAdapter] Verification error:", err);
+            logger.error("[BCryptAdapter] Verification error:", err);
             throw new Error("Password verification failed.");
         }
     }
