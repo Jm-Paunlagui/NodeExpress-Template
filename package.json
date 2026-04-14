@@ -27,6 +27,8 @@
         "test:summary": "mocha --file test/server/setup.js \"test/server/**/*.test.js\" --timeout 30000 --exit --recursive --reporter min"
     },
     "dependencies": {
+        "argon2": "^0.44.0",
+        "argon2id": "^1.0.1",
         "axios": "^1.14.0",
         "bcryptjs": "^3.0.3",
         "blob-stream": "^0.1.3",
