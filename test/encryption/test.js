@@ -2,8 +2,7 @@ const path = require("path");
 const dotenv = require("dotenv");
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 const crypto = require("crypto");
-const SymmetricCrypto = require("../../src/utils/encryption/SymmetricCrypto");
-
+const { SymmetricCrypto } = require("../../src/utils/encryption/CryptoVault");
 
 const { EncryptionAlgorithm, Encryptor, Decryptor, SecurityCryptHelper } =
     SymmetricCrypto;
