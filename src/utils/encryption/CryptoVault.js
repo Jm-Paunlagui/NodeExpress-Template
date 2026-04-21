@@ -628,6 +628,99 @@ class CryptoVault {
     static get symmetric() {
         return SymmetricCrypto;
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // DATA SIGNING — tamper-evident bcrypt-based signatures
+    //
+    // bcrypt.hash(payload) produces a salted one-way digest — the same
+    // mechanism used for passwords.  Storing that digest as a "signature"
+    // lets us later call bcrypt.compare(payload, sig) to confirm the payload
+    // has not changed, without ever storing the plaintext.
+    //
+    // signSysRecord / verifySysRecord tie EMP_ID | EMP_PW | EMP_ROLE into a
+    // single canonical string so any modification to any of those three
+    // fields breaks the check.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /**
+     * Produces a bcrypt digest of `payload` for tamper-evident storage.
+     * @param {string} payload
+     * @returns {Promise<string>}
+     */
+    static async signData(payload) {
+        if (!payload || typeof payload !== "string") {
+            throw new TypeError(
+                "[CryptoVault] signData: payload must be a non-empty string.",
+            );
+        }
+        const bcrypt = require("bcryptjs");
+        return bcrypt.hash(payload, getBcryptRounds());
+    }
+
+    /**
+     * Verifies that `payload` matches a previously stored `signature`.
+     * @param {string} payload
+     * @param {string} signature - Value returned by signData()
+     * @returns {Promise<boolean>}
+     */
+    static async verifySignature(payload, signature) {
+        if (!payload || typeof payload !== "string") {
+            throw new TypeError(
+                "[CryptoVault] verifySignature: payload must be a non-empty string.",
+            );
+        }
+        if (!signature || typeof signature !== "string") return false;
+        const bcrypt = require("bcryptjs");
+        try {
+            return await bcrypt.compare(payload, signature);
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Builds the canonical string for a T_EMP_MGMT_ADMIN row.
+     * Field order is fixed — changing any value breaks the signature.
+     * @param {string|number} empId
+     * @param {string} empPw   - The stored (bcrypt-hashed) password
+     * @param {string} empRole
+     * @returns {string}
+     */
+    static buildSysPayload(empId, empPw, empRole) {
+        return `${empId}|${empPw}|${empRole}`;
+    }
+
+    /**
+     * Signs a T_EMP_MGMT_ADMIN row.  Call this whenever you INSERT or UPDATE
+     * EMP_ID / EMP_PW / EMP_ROLE and persist the result as SYSSIGNATURE.
+     * @param {string|number} empId
+     * @param {string} empPw
+     * @param {string} empRole
+     * @returns {Promise<string>}
+     */
+    static async signSysRecord(empId, empPw, empRole) {
+        return CryptoVault.signData(
+            CryptoVault.buildSysPayload(empId, empPw, empRole),
+        );
+    }
+
+    /**
+     * Verifies a T_EMP_MGMT_ADMIN row against its stored SYSSIGNATURE.
+     * Returns false (not throws) on any mismatch so callers can degrade
+     * gracefully to the default "User" role.
+     * @param {string|number} empId
+     * @param {string} empPw
+     * @param {string} empRole
+     * @param {string} sysSignature
+     * @returns {Promise<boolean>}
+     */
+    static async verifySysRecord(empId, empPw, empRole, sysSignature) {
+        if (!sysSignature) return false;
+        return CryptoVault.verifySignature(
+            CryptoVault.buildSysPayload(empId, empPw, empRole),
+            sysSignature,
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -874,6 +967,7 @@ if (require.main === module) {
                 hash,
             );
             console.log(`    Hash      : ${hash.substring(0, 12)}…[REDACTED]`);
+            console.log(`    Config    :`, CryptoVault.config);
             if (verified) pass("TripleDES hash → verify (correct password)");
             else fail("TripleDES verify", { message: "Should be true" });
             if (!wrongVerify)
@@ -1053,7 +1147,7 @@ if (require.main === module) {
     };
 
     runTests().catch((err) => {
-        console.error(`\n💥 Unhandled test error: ${err?.constructor?.name ?? "Error"}`);
+        console.error("\n💥 Unhandled test error:", err);
         process.exit(1);
     });
 }
