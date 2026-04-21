@@ -27,7 +27,7 @@ async function it(label, fn) {
         console.log(`  ✔  ${label}`);
         passed++;
     } catch (err) {
-        console.log(`  ✘  ${label}\n       → ${err.message}`);
+        console.log(`  ✘  ${label}: ${err?.constructor?.name ?? "Error"}`);
         failed++;
     }
 }
@@ -91,10 +91,10 @@ function assert(cond, msg) {
     await it("encryptText / decryptText round-trip (multiple samples)", async () => {
         for (const s of ["password123", "P@ssw0rd!", "Continental01"]) {
             const e = SecurityCryptHelper.encryptText(s);
-            assert(e !== null, `null for "${s}"`);
+            assert(e !== null, "encryptText returned null");
             assert(
                 SecurityCryptHelper.decryptText(e) === s,
-                `Mismatch for "${s}"`,
+                "Round-trip mismatch",
             );
         }
     });

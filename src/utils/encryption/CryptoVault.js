@@ -389,6 +389,9 @@ const MAX_PASSWORD_BYTES = parseEnvInt(
 // SECTION 3: INTERNAL HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// HMAC-SHA256 here is a keyed pepper transformation, NOT the password hash.
+// Computational hardness is enforced by Argon2 in the caller; this step only
+// binds a server-side secret to the value before it reaches Argon2.
 const applyPepper = (password) =>
     crypto.createHmac("sha256", getArgon2Pepper()).update(password).digest();
 
@@ -787,7 +790,7 @@ if (require.main === module) {
     const hr = () => console.log("─".repeat(65));
     const pass = (label) => console.log(`  ✅  ${label}`);
     const fail = (label, err) =>
-        console.error(`  ❌  ${label}:`, err.message || err);
+        console.error(`  ❌  ${label}: ${err?.constructor?.name ?? "Error"}`);
 
     const runTests = async () => {
         console.log(
@@ -816,9 +819,9 @@ if (require.main === module) {
 
             const encrypted = SecurityCryptHelper.encryptText(TEST_PASSWORD);
             const decrypted = SecurityCryptHelper.decryptText(encrypted);
-            console.log(`    Plain     : ${TEST_PASSWORD}`);
+            console.log(`    Plain     : [REDACTED]`);
             console.log(`    Encrypted : ${encrypted}`);
-            console.log(`    Decrypted : ${decrypted}`);
+            console.log(`    Decrypted : [REDACTED]`);
             if (decrypted === TEST_PASSWORD) pass("TripleDES round-trip");
             else fail("TripleDES round-trip", { message: "Mismatch!" });
 
@@ -870,8 +873,7 @@ if (require.main === module) {
                 "WrongPassword",
                 hash,
             );
-            console.log(`    Hash      : ${hash}`);
-            console.log(`    Config    :`, CryptoVault.config);
+            console.log(`    Hash      : ${hash.substring(0, 12)}…[REDACTED]`);
             if (verified) pass("TripleDES hash → verify (correct password)");
             else fail("TripleDES verify", { message: "Should be true" });
             if (!wrongVerify)
@@ -898,8 +900,7 @@ if (require.main === module) {
                 "WrongPassword",
                 hash,
             );
-            console.log(`    Hash      : ${hash}`);
-            console.log(`    Config    :`, CryptoVault.config);
+            console.log(`    Hash      : ${hash.substring(0, 12)}…[REDACTED]`);
             if (verified) pass("BCrypt hash → verify (correct password)");
             else fail("BCrypt verify", { message: "Should be true" });
             if (!wrongVerify) pass("BCrypt verify (wrong password rejected)");
@@ -936,8 +937,7 @@ if (require.main === module) {
                 "WrongPassword",
                 hash,
             );
-            console.log(`    Hash      : ${hash}`);
-            console.log(`    Config    :`, CryptoVault.config);
+            console.log(`    Hash      : ${hash.substring(0, 12)}…[REDACTED]`);
             if (verified) pass("Argon2 hash → verify (correct password)");
             else fail("Argon2 verify", { message: "Should be true" });
             if (!wrongVerify) pass("Argon2 verify (wrong password rejected)");
@@ -1053,7 +1053,7 @@ if (require.main === module) {
     };
 
     runTests().catch((err) => {
-        console.error("\n💥 Unhandled test error:", err);
+        console.error(`\n💥 Unhandled test error: ${err?.constructor?.name ?? "Error"}`);
         process.exit(1);
     });
 }
