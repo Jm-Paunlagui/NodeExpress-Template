@@ -360,6 +360,7 @@ let _mode = null;
 let _bcryptRounds = null;
 let _argon2Config = null;
 let _argon2Pepper = null;
+let _signingSecret = null;
 
 const getMode = () => {
     if (!_mode) _mode = resolveMode();
@@ -376,6 +377,23 @@ const getArgon2Config = () => {
 const getArgon2Pepper = () => {
     if (!_argon2Pepper) _argon2Pepper = resolveArgon2Pepper();
     return _argon2Pepper;
+};
+
+// ─── Data Signing Config ───
+const resolveSigningSecret = () => {
+    const secret = process.env.DATA_SIGNING_SECRET;
+    if (!secret || secret.trim().length < 32) {
+        throw new Error(
+            "[CryptoVault] DATA_SIGNING_SECRET must be set and at least 32 characters.\n" +
+                "  Generate: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
+        );
+    }
+    return secret.trim();
+};
+
+const getSigningSecret = () => {
+    if (!_signingSecret) _signingSecret = resolveSigningSecret();
+    return _signingSecret;
 };
 
 const MAX_PASSWORD_BYTES = parseEnvInt(
@@ -630,22 +648,70 @@ class CryptoVault {
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    // DATA SIGNING — tamper-evident bcrypt-based signatures
+    // DATA SIGNING — tamper-evident HMAC-SHA256 signatures (generic record API)
     //
-    // bcrypt.hash(payload) produces a salted one-way digest — the same
-    // mechanism used for passwords.  Storing that digest as a "signature"
-    // lets us later call bcrypt.compare(payload, sig) to confirm the payload
-    // has not changed, without ever storing the plaintext.
+    // HMAC-SHA256(secret, payload) produces a keyed digest.  Storing that
+    // hex digest as a "signature" lets us later recompute HMAC(payload) and
+    // compare with crypto.timingSafeEqual — detecting any field mutation
+    // without exposing the secret or the plaintext.
     //
-    // signSysRecord / verifySysRecord tie EMP_ID | EMP_PW | EMP_ROLE into a
-    // single canonical string so any modification to any of those three
-    // fields breaks the check.
+    // buildPayload() turns any { field: value } map into a canonical,
+    // deterministic string.  Keys are sorted alphabetically so call-site
+    // insertion order never matters.  A `context` prefix (e.g. table name)
+    // namespaces the signature so a digest computed for one entity cannot
+    // be replayed against a different one.
+    //
+    // signRecord / verifyRecord are the high-level helpers projects use.
+    // signData / verifySignature remain available for raw-string use cases
+    // (webhook payloads, JWT claims, etc.).
+    //
+    // Secret source: DATA_SIGNING_SECRET env var (≥ 32 chars, kept separate
+    // from JWT_SECRET and ARGON2_PEPPER — one purpose per secret).
     // ───────────────────────────────────────────────────────────────────────
 
     /**
-     * Produces a bcrypt digest of `payload` for tamper-evident storage.
+     * Builds a canonical, deterministic payload string from any record.
+     *
+     * Keys are sorted alphabetically — insertion order at the call site never
+     * affects the output.  `context` namespaces the signature so a digest
+     * produced for one entity cannot be replayed against another.
+     *
+     * @param {string} context  - Entity / table identifier (e.g. 'USERS', 'T_ORDERS')
+     * @param {Record<string, unknown>} fields - Plain object of field → value pairs
+     * @returns {string}
+     *
+     * @example
+     * CryptoVault.buildPayload('USERS', { ROLE: 'admin', ID: 1, PW: hash });
+     * // → 'USERS:ID=1|PW=<hash>|ROLE=admin'   (keys always sorted A→Z)
+     */
+    static buildPayload(context, fields) {
+        if (!context || typeof context !== "string") {
+            throw new TypeError(
+                "[CryptoVault] buildPayload: context must be a non-empty string.",
+            );
+        }
+        if (
+            !fields ||
+            typeof fields !== "object" ||
+            Array.isArray(fields)
+        ) {
+            throw new TypeError(
+                "[CryptoVault] buildPayload: fields must be a plain object.",
+            );
+        }
+        const parts = Object.keys(fields)
+            .sort()
+            .map((k) => `${k}=${fields[k]}`);
+        return `${context}:${parts.join("|")}`;
+    }
+
+    /**
+     * Produces an HMAC-SHA256 hex digest of a raw `payload` string.
+     * Prefer `signRecord()` for DB row integrity — use this for raw-string
+     * use cases (webhook bodies, JWT claims, etc.).
+     *
      * @param {string} payload
-     * @returns {Promise<string>}
+     * @returns {Promise<string>} 64-character hex string
      */
     static async signData(payload) {
         if (!payload || typeof payload !== "string") {
@@ -653,14 +719,19 @@ class CryptoVault {
                 "[CryptoVault] signData: payload must be a non-empty string.",
             );
         }
-        const bcrypt = require("bcryptjs");
-        return bcrypt.hash(payload, getBcryptRounds());
+        return crypto
+            .createHmac("sha256", getSigningSecret())
+            .update(payload, "utf8")
+            .digest("hex");
     }
 
     /**
-     * Verifies that `payload` matches a previously stored `signature`.
+     * Verifies that a raw `payload` string matches a stored HMAC-SHA256
+     * `signature`.  Uses crypto.timingSafeEqual to prevent timing attacks.
+     * Prefer `verifyRecord()` for DB row integrity.
+     *
      * @param {string} payload
-     * @param {string} signature - Value returned by signData()
+     * @param {string} signature - 64-char hex string returned by signData()
      * @returns {Promise<boolean>}
      */
     static async verifySignature(payload, signature) {
@@ -670,55 +741,69 @@ class CryptoVault {
             );
         }
         if (!signature || typeof signature !== "string") return false;
-        const bcrypt = require("bcryptjs");
+
+        const expected = crypto
+            .createHmac("sha256", getSigningSecret())
+            .update(payload, "utf8")
+            .digest();
+
+        let actual;
         try {
-            return await bcrypt.compare(payload, signature);
+            actual = Buffer.from(signature, "hex");
         } catch {
             return false;
         }
+
+        // timingSafeEqual requires equal-length buffers; mismatched length is a
+        // fast-path rejection that leaks no timing information about the content.
+        if (actual.length !== expected.length) return false;
+        return crypto.timingSafeEqual(expected, actual);
     }
 
     /**
-     * Builds the canonical string for a T_EMP_MGMT_ADMIN row.
-     * Field order is fixed — changing any value breaks the signature.
-     * @param {string|number} empId
-     * @param {string} empPw   - The stored (bcrypt-hashed) password
-     * @param {string} empRole
-     * @returns {string}
-     */
-    static buildSysPayload(empId, empPw, empRole) {
-        return `${empId}|${empPw}|${empRole}`;
-    }
-
-    /**
-     * Signs a T_EMP_MGMT_ADMIN row.  Call this whenever you INSERT or UPDATE
-     * EMP_ID / EMP_PW / EMP_ROLE and persist the result as SYSSIGNATURE.
-     * @param {string|number} empId
-     * @param {string} empPw
-     * @param {string} empRole
+     * Signs any DB record by building a canonical payload from `context` +
+     * `fields` then HMAC-SHA256-signing it.  Persist the result alongside
+     * the row.  Any future change to any signed field will break the check.
+     *
+     * @param {string} context  - Entity / table identifier
+     * @param {Record<string, unknown>} fields
      * @returns {Promise<string>}
+     *
+     * @example
+     * // MEAL project — admin table
+     * const sig = await CryptoVault.signRecord('T_EMP_MGMT_ADMIN', {
+     *     EMP_ID: 'ADMIN01', EMP_PW: hash, EMP_ROLE: 'SuperAdmin',
+     * });
+     *
+     * @example
+     * // Any other project
+     * const sig = await CryptoVault.signRecord('USERS', {
+     *     USER_ID: 42, USERNAME: 'jsmith', ROLE: 'editor',
+     * });
      */
-    static async signSysRecord(empId, empPw, empRole) {
-        return CryptoVault.signData(
-            CryptoVault.buildSysPayload(empId, empPw, empRole),
-        );
+    static async signRecord(context, fields) {
+        return CryptoVault.signData(CryptoVault.buildPayload(context, fields));
     }
 
     /**
-     * Verifies a T_EMP_MGMT_ADMIN row against its stored SYSSIGNATURE.
-     * Returns false (not throws) on any mismatch so callers can degrade
-     * gracefully to the default "User" role.
-     * @param {string|number} empId
-     * @param {string} empPw
-     * @param {string} empRole
-     * @param {string} sysSignature
+     * Verifies a DB record against its stored signature.
+     * Returns false (not throws) on any mismatch — callers degrade gracefully.
+     *
+     * @param {string} context
+     * @param {Record<string, unknown>} fields
+     * @param {string|null|undefined} signature
      * @returns {Promise<boolean>}
+     *
+     * @example
+     * const ok = await CryptoVault.verifyRecord('T_EMP_MGMT_ADMIN', {
+     *     EMP_ID: row.EMP_ID, EMP_PW: row.EMP_PW, EMP_ROLE: row.EMP_ROLE,
+     * }, row.SYSSIGNATURE);
      */
-    static async verifySysRecord(empId, empPw, empRole, sysSignature) {
-        if (!sysSignature) return false;
+    static async verifyRecord(context, fields, signature) {
+        if (!signature) return false;
         return CryptoVault.verifySignature(
-            CryptoVault.buildSysPayload(empId, empPw, empRole),
-            sysSignature,
+            CryptoVault.buildPayload(context, fields),
+            signature,
         );
     }
 }
@@ -1133,6 +1218,100 @@ if (require.main === module) {
             fail("Empty hash", { message: "Should throw" });
         } catch {
             pass("Rejects empty hash in verifyPassword");
+        }
+
+        // ── TEST GROUP 8: CryptoVault — HMAC-SHA256 Data Signing ──
+        console.log("\n▸ CryptoVault — HMAC-SHA256 Data Signing");
+        hr();
+        try {
+            if (
+                !process.env.DATA_SIGNING_SECRET ||
+                process.env.DATA_SIGNING_SECRET.length < 32
+            ) {
+                process.env.DATA_SIGNING_SECRET = crypto
+                    .randomBytes(32)
+                    .toString("hex");
+            }
+            _signingSecret = null; // reset singleton so it picks up the env var
+
+            // ── signData / verifySignature (raw-string primitives) ──
+            const rawPayload = "raw:test-payload-string";
+            const rawSig = await CryptoVault.signData(rawPayload);
+            if (typeof rawSig === "string" && rawSig.length === 64)
+                pass("signData returns 64-char hex string");
+            else fail("signData output", { message: `Got length ${rawSig?.length}` });
+
+            if (await CryptoVault.verifySignature(rawPayload, rawSig))
+                pass("verifySignature: correct payload matches");
+            else fail("verifySignature correct", { message: "Should be true" });
+
+            if (!(await CryptoVault.verifySignature(rawPayload + "X", rawSig)))
+                pass("verifySignature: tampered payload rejected");
+            else fail("verifySignature tamper", { message: "Should be false" });
+
+            if (!(await CryptoVault.verifySignature(rawPayload, "a".repeat(64))))
+                pass("verifySignature: forged signature rejected");
+            else fail("verifySignature forged", { message: "Should be false" });
+
+            const rawSig2 = await CryptoVault.signData(rawPayload);
+            if (rawSig === rawSig2)
+                pass("signData is deterministic (same input → same output)");
+            else fail("signData determinism", { message: "Signatures differ" });
+
+            // ── buildPayload ──
+            const p1 = CryptoVault.buildPayload("USERS", { ROLE: "admin", ID: 1, PW: "hash" });
+            const p2 = CryptoVault.buildPayload("USERS", { ID: 1, PW: "hash", ROLE: "admin" });
+            if (p1 === p2)
+                pass("buildPayload: key insertion order does not affect output");
+            else fail("buildPayload order", { message: `p1=${p1} p2=${p2}` });
+
+            if (p1.startsWith("USERS:"))
+                pass("buildPayload: context prefix present");
+            else fail("buildPayload prefix", { message: p1 });
+
+            const pOther = CryptoVault.buildPayload("ORDERS", { ID: 1, PW: "hash", ROLE: "admin" });
+            if (p1 !== pOther)
+                pass("buildPayload: different context → different payload");
+            else fail("buildPayload context isolation", { message: "Should differ" });
+
+            // ── signRecord / verifyRecord round-trip ──
+            const fields = { EMP_ID: "EMP001", EMP_PW: "$argon2id$v=19$m=19456$...", EMP_ROLE: "SuperAdmin" };
+            const recSig = await CryptoVault.signRecord("T_EMP_MGMT_ADMIN", fields);
+            if (await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", fields, recSig))
+                pass("signRecord / verifyRecord round-trip");
+            else fail("signRecord round-trip", { message: "Should be true" });
+
+            // wrong field value
+            const badFields = { ...fields, EMP_ROLE: "User" };
+            if (!(await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", badFields, recSig)))
+                pass("verifyRecord: mutated field value rejected");
+            else fail("verifyRecord mutation", { message: "Should be false" });
+
+            // wrong context — same fields, different entity
+            if (!(await CryptoVault.verifyRecord("OTHER_TABLE", fields, recSig)))
+                pass("verifyRecord: wrong context rejected (cross-entity replay blocked)");
+            else fail("verifyRecord context", { message: "Should be false" });
+
+            // null / missing signature handled gracefully
+            if (!(await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", fields, null)))
+                pass("verifyRecord: null signature returns false");
+            else fail("verifyRecord null sig", { message: "Should be false" });
+
+            // buildPayload input validation
+            try {
+                CryptoVault.buildPayload("", { ID: 1 });
+                fail("buildPayload empty context", { message: "Should throw" });
+            } catch {
+                pass("buildPayload: rejects empty context");
+            }
+            try {
+                CryptoVault.buildPayload("USERS", null);
+                fail("buildPayload null fields", { message: "Should throw" });
+            } catch {
+                pass("buildPayload: rejects null fields");
+            }
+        } catch (err) {
+            fail("HMAC-SHA256 signing tests", err);
         }
 
         console.log(
