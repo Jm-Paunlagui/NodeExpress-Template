@@ -39,6 +39,12 @@ const AUTH_ERRORS = {
     TOKEN_INVALID: "Invalid token. Please log in again.",
     MISSING_CREDENTIALS: "Username and password are required.",
     INVALID_CREDENTIALS: "Invalid username or password.",
+    ACCOUNT_INTEGRITY_FAILED:
+        "Account integrity check failed. Please contact support.",
+    ACCOUNT_LOCKED:
+        "Too many failed sign-in attempts. Please wait before trying again.",
+    ACCOUNT_LOCKED_PERMANENTLY:
+        "Account locked due to too many failed attempts. Please contact HR to reset your password.",
 };
 
 // ─── Validation error messages ────────────────────────────────────────────────

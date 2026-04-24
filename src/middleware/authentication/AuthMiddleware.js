@@ -11,6 +11,7 @@
 const jwt = require("jsonwebtoken");
 const { AppError, AUTH_ERRORS } = require("../../constants/errors");
 const { logger } = require("../../utils/logger");
+const AuthService = require("../../services/auth.service");
 
 class AuthMiddleware {
     /**
@@ -56,7 +57,7 @@ class AuthMiddleware {
         // Both sources are validated by jwt.verify below.
         const token =
             req.headers["authorization"]?.split(" ")[1] ||
-            req.signedCookies?.token ||
+            req.signedCookies?.[AuthService.COOKIE_NAMES.ACCESS] ||
             "";
 
         // jwt.verify handles missing (""), malformed, expired, and forged
@@ -64,29 +65,33 @@ class AuthMiddleware {
         jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
             if (err) {
                 // JsonWebTokenError  → missing / malformed → 401
-                // TokenExpiredError  → expired             → 403
+                // TokenExpiredError  → session expired     → 498
                 // NotBeforeError     → used too early      → 403
                 const isMissing = err.name === "JsonWebTokenError";
-                const statusCode = isMissing ? 401 : 403;
+                const isExpired = err.name === "TokenExpiredError";
+                const statusCode = isMissing ? 401 : isExpired ? 498 : 403;
 
                 if (isFileDownload) {
                     const title = isMissing
                         ? "Authentication Required"
-                        : "Access Denied";
+                        : isExpired
+                          ? "Session Expired"
+                          : "Access Denied";
                     const line1 = isMissing
                         ? "You need to be logged in to download this file."
-                        : "Your authentication token is invalid or has expired.";
+                        : isExpired
+                          ? "Your session has expired."
+                          : "Your authentication token is invalid or has expired.";
                     const line2 = isMissing
                         ? "Please log in and try again."
                         : "Please log in again and try downloading the file.";
 
                     res.setHeader("Content-Type", "text/html; charset=utf-8");
                     res.setHeader("Content-Disposition", "inline");
-                    
-                    logger.warn(
-                        `{title} - ${line1} ${line2}`,
-                    );
 
+                    logger.warn(
+                        `${title} - ${line1} ${line2}`,
+                    );
 
                     return res
                         .status(statusCode)
@@ -95,12 +100,20 @@ class AuthMiddleware {
                         );
                 }
 
+                // Non-download path
+                if (isExpired) {
+                    return next(
+                        new AppError(AUTH_ERRORS.TOKEN_EXPIRED, 498, {
+                            type: "InvalidTokenError",
+                            hint: "Your session has expired. Please log in again.",
+                        }),
+                    );
+                }
+
                 const errorMsg = isMissing
                     ? AUTH_ERRORS.USER_NOT_FOUND
                     : AUTH_ERRORS.FORBIDDEN_ACCESS;
-                const errorType = isMissing
-                    ? "AuthenticationError"
-                    : "AuthenticationError";
+                const errorType = "AuthenticationError";
                 const hint = isMissing
                     ? "Provide a valid token."
                     : "Token invalid or expired.";
@@ -241,7 +254,7 @@ class AuthMiddleware {
 .login-button{background:#1976d2;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;display:inline-block;margin-top:15px}</style>
 </head><body><div class="error-container"><h1 class="error-title">${t}</h1>
 <div class="error-message"><p>${l1}</p><p>${l2}</p></div>
-<a href="/login" class="login-button">Go to Login</a>
+<a href="/auth" class="login-button">Go to Login</a>
 <a href="javascript:history.back()" class="login-button">Go Back</a>
 </div></body></html>`;
     }
