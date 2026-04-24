@@ -7,6 +7,7 @@ const router = express.Router();
 
 const healthRoutes = require("./health.route");
 const csrfRoutes = require("./csrf.route");
+const authRoutes = require("./auth.route");
 
 // ─── Mount routes ─────────────────────────────────────────────────────────────
 
@@ -16,8 +17,7 @@ router.use(healthRoutes);
 // CSRF routes
 router.use("/csrf", csrfRoutes);
 
-// ── Resource routes (add here as you build them) ──────────────────────────────
-// const authRoutes = require('./auth.route');
-// router.use('/auth', authRoutes);
+// Auth routes
+router.use("/auth", authRoutes);
 
 module.exports = router;

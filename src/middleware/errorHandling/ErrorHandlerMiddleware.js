@@ -11,6 +11,7 @@
 
 const { logger } = require("../../utils/logger");
 const ORA_MAP = require("./OraCode");
+const { getStatusTitle } = require("../../constants/responses");
 
 class ErrorHandlerMiddleware {
     constructor() {
@@ -47,6 +48,7 @@ class ErrorHandlerMiddleware {
         const response = {
             status: "error",
             code: statusCode,
+            title: getStatusTitle(statusCode),
             message,
             error: {
                 type,
@@ -145,6 +147,7 @@ class ErrorHandlerMiddleware {
         res.status(404).json({
             status: "error",
             code:    404,
+            title:   getStatusTitle(404),
             message: `Route ${req.method} ${req.originalUrl} not found`,
             error: {
                 type: "NotFoundError",

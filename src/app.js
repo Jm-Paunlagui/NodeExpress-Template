@@ -79,9 +79,14 @@ app.use(defaultCors.handle.bind(defaultCors));
 app.use(defaultCookieParser.handle.bind(defaultCookieParser)); // lgtm[js/missing-csrf-middleware] CSRF is enforced at step 9 below
 
 // 9. CSRF protection — must come after cookie-parser so the secret cookie is readable.
+//    The CSRF token endpoints (/api/v1/csrf/*) are excluded to avoid a catch-22 where
+//    a valid token is required to obtain or refresh a token.
 //    doubleCsrf only enforces on state-changing methods (POST/PUT/DELETE/PATCH);
 //    GET /csrf/token and other safe methods pass through automatically.
-app.use(defaultCsrf.handle.bind(defaultCsrf));
+app.use((req, res, next) => {
+    if (req.path.startsWith("/api/v1/csrf")) return next();
+    defaultCsrf.handle.bind(defaultCsrf)(req, res, next);
+});
 
 // 10. Capture response body for downstream logging
 app.use(defaultErrorHandler.captureResponseBody.bind(defaultErrorHandler));

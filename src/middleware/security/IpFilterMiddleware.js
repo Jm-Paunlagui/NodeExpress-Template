@@ -6,6 +6,7 @@
  */
 
 const { logger } = require("../../utils/logger");
+const { getStatusTitle } = require("../../constants/responses");
 
 class IpFilterMiddleware {
     constructor(options = {}) {
@@ -39,6 +40,7 @@ class IpFilterMiddleware {
             return res.status(403).json({
                 status: "error",
                 code: 403,
+                title: getStatusTitle(403),
                 message: "Access denied",
             });
         }

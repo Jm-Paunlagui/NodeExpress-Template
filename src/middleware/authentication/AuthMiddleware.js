@@ -64,12 +64,12 @@ class AuthMiddleware {
         // tokens uniformly — the security decision is always server-controlled.
         jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
             if (err) {
-                // JsonWebTokenError  → missing / malformed → 401
-                // TokenExpiredError  → session expired     → 498
-                // NotBeforeError     → used too early      → 403
+                // JsonWebTokenError  → missing / malformed / tampered → 401
+                // TokenExpiredError  → session timed out              → 440
+                // NotBeforeError     → used too early                 → 403
                 const isMissing = err.name === "JsonWebTokenError";
                 const isExpired = err.name === "TokenExpiredError";
-                const statusCode = isMissing ? 401 : isExpired ? 498 : 403;
+                const statusCode = isMissing ? 401 : isExpired ? 440 : 403;
 
                 if (isFileDownload) {
                     const title = isMissing
@@ -103,9 +103,9 @@ class AuthMiddleware {
                 // Non-download path
                 if (isExpired) {
                     return next(
-                        new AppError(AUTH_ERRORS.TOKEN_EXPIRED, 498, {
-                            type: "InvalidTokenError",
-                            hint: "Your session has expired. Please log in again.",
+                        new AppError(AUTH_ERRORS.TOKEN_EXPIRED, 440, {
+                            type: "SessionTimeoutError",
+                            hint: "Your session has expired. Please sign in again.",
                         }),
                     );
                 }

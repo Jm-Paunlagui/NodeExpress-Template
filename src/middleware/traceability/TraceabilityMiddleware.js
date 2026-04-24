@@ -9,6 +9,21 @@
 const { logger } = require("../../utils/logger");
 const { nanoid } = require("../../utils/nanoidLoader");
 
+const SENSITIVE_PATTERNS = [
+    "password", "passwd", "pwd", "token", "secret",
+    "apikey", "auth", "otp", "pin", "cvv", "cvc",
+    "ssn", "privatekey", "creditcard", "cardnumber",
+];
+
+function isSensitiveKey(key) {
+    const norm = key.toLowerCase().replace(/[-_\s]/g, "");
+    return SENSITIVE_PATTERNS.some((p) => norm.includes(p));
+}
+
+function redactValue(key, value) {
+    return isSensitiveKey(key) ? "[REDACTED]" : value;
+}
+
 class TraceabilityMiddleware {
     constructor(options = {}) {
         this._excludedUrls = options.excludedUrls ?? [
@@ -63,7 +78,7 @@ class TraceabilityMiddleware {
 
         if (Object.keys(req.query).length > 0) {
             const params = Object.entries(req.query)
-                .map(([k, v]) => `${k}=${v}`)
+                .map(([k, v]) => `${k}=${redactValue(k, v)}`)
                 .join("&");
             message += ` [PARAMS @ ${params}]`;
         }
@@ -73,12 +88,13 @@ class TraceabilityMiddleware {
             if (!req.body) {
                 bodyContent = "req.body is undefined";
             } else if (typeof req.body !== "object") {
-                bodyContent = `req.body is ${typeof req.body}: ${req.body}`;
+                bodyContent = `req.body is ${typeof req.body}`;
             } else if (Object.keys(req.body).length === 0) {
                 bodyContent = "req.body is empty object";
             } else {
                 bodyContent = Object.entries(req.body)
                     .map(([key, value]) => {
+                        if (isSensitiveKey(key)) return `${key}=[REDACTED]`;
                         if (value === null) return `${key}=null`;
                         if (value === undefined) return `${key}=undefined`;
                         if (typeof value === "object") {

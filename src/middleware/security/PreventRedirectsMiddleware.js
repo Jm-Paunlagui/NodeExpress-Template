@@ -6,6 +6,8 @@
  * predictable for SPA / mobile clients.
  */
 
+const { getStatusTitle } = require("../../constants/responses");
+
 class PreventRedirectsMiddleware {
     constructor() {
         this._redirectStatusMessages = {
@@ -38,6 +40,7 @@ class PreventRedirectsMiddleware {
             return res.status(isRedirectStatus ? status : 302).json({
                 status: "error",
                 code: status,
+                title: getStatusTitle(status),
                 message: messages[status] || "Redirect prevented",
                 error: {
                     type: "RedirectPrevented",

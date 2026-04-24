@@ -8,6 +8,7 @@
  */
 
 const { logger } = require("../../utils/logger");
+const { getStatusTitle } = require("../../constants/responses");
 
 class SecurityFilterMiddleware {
     constructor(options = {}) {
@@ -108,6 +109,7 @@ class SecurityFilterMiddleware {
             return res.status(403).json({
                 status: "error",
                 code: 403,
+                title: getStatusTitle(403),
                 message: "Forbidden",
                 error: { type: "Forbidden" },
             });
@@ -123,6 +125,7 @@ class SecurityFilterMiddleware {
             return res.status(405).json({
                 status: "error",
                 code: 405,
+                title: getStatusTitle(405),
                 message: "Method Not Allowed",
                 error: { type: "MethodNotAllowed" },
             });
@@ -138,6 +141,7 @@ class SecurityFilterMiddleware {
             return res.status(404).json({
                 status: "error",
                 code: 404,
+                title: getStatusTitle(404),
                 message: "Not Found",
                 error: { type: "NotFound" },
             });

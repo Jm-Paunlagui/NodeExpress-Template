@@ -6,6 +6,7 @@
  */
 
 const NodeCache = require("node-cache");
+const { getStatusTitle } = require("../../constants/responses");
 const { logger } = require("../../utils/logger");
 
 class RateLimiterMiddleware {
@@ -80,6 +81,7 @@ class RateLimiterMiddleware {
             return res.status(429).json({
                 status: "error",
                 code: 429,
+                title: getStatusTitle(429),
                 message: "Too many requests. Please try again later.",
                 error: {
                     type: "RateLimitExceeded",
@@ -218,6 +220,7 @@ const authRateLimiter = new RateLimiterMiddleware({
         res.status(429).json({
             status: "error",
             code: 429,
+            title: getStatusTitle(429),
             message: "Too many attempts. Please wait before trying again.",
             error: {
                 type: "RateLimitExceeded",

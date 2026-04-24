@@ -3,7 +3,7 @@
 const dotenv = require("dotenv");
 dotenv.config({ path: ".env" });
 
-const isDevelopment = process.env.NODE_ENV === "development";
+// const isDevelopment = process.env.NODE_ENV === "development";
 
 function buildSimpleConnectString(host, port, service) {
     return `${host}:${port}/${service}`;
@@ -43,29 +43,19 @@ const connections = {
         connectString: buildSimpleConnectString(
             process.env.DB_HOST,
             process.env.DB_PORT,
-            process.env.DB_SERVICE_NAME,
+            process.env.DB_UA_SERVICE_NAME,
         ),
     },
 
-    unitInventory: isDevelopment
-        ? {
-              user: process.env.UI_TEST_DB_USERNAME,
-              password: process.env.UI_TEST_DB_PASSWORD,
-              connectString: buildTNSConnectString(
-                  process.env.DB_TEST_HOST,
-                  process.env.DB_TEST_PORT,
-                  process.env.DB_TEST_SID,
-              ),
-          }
-        : {
-              user: process.env.UI_DB_USERNAME,
-              password: process.env.UI_DB_PASSWORD,
-              connectString: buildSimpleConnectString(
-                  process.env.DB_HOST,
-                  process.env.DB_PORT,
-                  process.env.DB_SERVICE_NAME,
-              ),
-          },
+    Meal: {
+        user: process.env.MEAL_DB_USERNAME,
+        password: process.env.MEAL_DB_PASSWORD,
+        connectString: buildSimpleConnectString(
+            process.env.DB_HOST,
+            process.env.DB_PORT,
+            process.env.DB_MEAL_SERVICE_NAME,
+        ),
+    },
 
     // ── Add new connections below ──────────────────────────────────────────
     // reportingDb: {
@@ -99,7 +89,7 @@ module.exports = {
     connections,
     getConnectionConfig,
     getConnectionNames,
-    isDevelopment,
+    // isDevelopment,
     buildSimpleConnectString,
     buildTNSConnectString,
 };
