@@ -806,6 +806,39 @@ class CryptoVault {
             signature,
         );
     }
+
+    /**
+     * Verifies a plain SHA-256 ROW_HASH produced by Oracle's STANDARD_HASH(..., 'SHA256').
+     *
+     * Oracle stores: UPPER(STANDARD_HASH(canonical_string, 'SHA256')) — 64-char hex VARCHAR2.
+     * This method replicates that computation in JS using Node's built-in `crypto` module
+     * and compares with timing-safe equality to prevent timing-based attacks.
+     *
+     * NOTE: This is NOT HMAC. Do not use CryptoVault.verifyRecord() for ROW_HASH columns —
+     * that method uses HMAC-SHA256 (keyed) which produces a completely different digest.
+     *
+     * @param {string} canonicalInput  - The pre-image string exactly as Oracle hashed it.
+     * @param {string} storedHash      - The ROW_HASH value retrieved from the DB (64-char hex).
+     * @returns {boolean}
+     *
+     * @example
+     * const canonical = `${row.ID}|${row.TRXN_ID}|${row.EMP_ID}|${row.AMOUNT}|${row.STATUS}|${row.CREATED_DATE}`;
+     * const ok = CryptoVault.verifyRowHash(canonical, row.ROW_HASH);
+     */
+    static verifyRowHash(canonicalInput, storedHash) {
+        if (!canonicalInput || !storedHash) return false;
+        const computed = crypto
+            .createHash('sha256')
+            .update(canonicalInput, 'utf8')
+            .digest('hex')
+            .toUpperCase();
+        const stored = storedHash.toUpperCase();
+        if (computed.length !== stored.length) return false;
+        return crypto.timingSafeEqual(
+            Buffer.from(computed, 'utf8'),
+            Buffer.from(stored, 'utf8'),
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
