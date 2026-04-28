@@ -35,7 +35,8 @@
  *   │ $between    │ Range — WHERE "field" BETWEEN :min AND :max      │
  *   │ $notBetween │ NOT BETWEEN                                      │
  *   │ $exists     │ IS NOT NULL / IS NULL                            │
- *   │ $regex      │ Pattern match — REGEXP_LIKE("field", :pattern)   │
+ *   │ $regex      │ Pattern match — REGEXP_LIKE("field", :pattern[, :opts]) │
+ *   │ $options    │ Regex flags sibling (e.g. 'i' for case-insensitive)     │
  *   │ $like       │ SQL LIKE — WHERE "field" LIKE :pattern           │
  *   │ $case       │ CASE WHEN ... THEN ... END                       │
  *   │ $coalesce   │ COALESCE(col1, col2, ...)                        │
@@ -241,7 +242,17 @@ function _parseFieldExpr(field, expr, binds, outerAlias, counter) {
         } else if (op === "$regex") {
             const bname = counter.next(`where_${field}`);
             binds[bname] = val;
-            conditions.push(`REGEXP_LIKE(${qField}, :${bname})`);
+            // Support MongoDB-style $options sibling (e.g. 'i' for case-insensitive)
+            const regexOpts = expr.$options;
+            if (regexOpts) {
+                const bOpts = counter.next(`where_${field}_opts`);
+                binds[bOpts] = regexOpts;
+                conditions.push(`REGEXP_LIKE(${qField}, :${bname}, :${bOpts})`);
+            } else {
+                conditions.push(`REGEXP_LIKE(${qField}, :${bname})`);
+            }
+        } else if (op === "$options") {
+            // Handled inside $regex — skip standalone processing
         } else if (op === "$like") {
             const bname = counter.next(`where_${field}`);
             binds[bname] = val;
