@@ -24,18 +24,20 @@
  */
 
 const crypto = require("crypto");
-const fs     = require("fs");
-const path   = require("path");
+const fs = require("fs");
+const path = require("path");
 
-const { logger }            = require("../utils/logger");
-const { changelogMessages } = require("../constants/messages/changelog.messages");
+const { logger } = require("../utils/logger");
+const {
+    changelogMessages,
+} = require("../constants/messages/changelog.messages");
 const { AppError, CHANGELOG_ERRORS } = require("../constants/errors");
 
-const DATA_DIR  = path.resolve(__dirname, "../../data");
+const DATA_DIR = path.resolve(__dirname, "../../data");
 const STORE_PATH = path.join(DATA_DIR, "changelog.enc");
-const ALG        = "aes-256-gcm";
-const IV_BYTES   = 12;
-const TAG_BYTES  = 16;
+const ALG = "aes-256-gcm";
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
 
 // ── Key resolution ────────────────────────────────────────────────────────────
 
@@ -56,12 +58,15 @@ function resolveKey() {
 
 function encrypt(plaintext) {
     const key = resolveKey();
-    const iv  = crypto.randomBytes(IV_BYTES);
+    const iv = crypto.randomBytes(IV_BYTES);
     const cipher = crypto.createCipheriv(ALG, key, iv);
-    const enc = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    const enc = Buffer.concat([
+        cipher.update(plaintext, "utf8"),
+        cipher.final(),
+    ]);
     return JSON.stringify({
-        iv:         iv.toString("hex"),
-        authTag:    cipher.getAuthTag().toString("hex"),
+        iv: iv.toString("hex"),
+        authTag: cipher.getAuthTag().toString("hex"),
         ciphertext: enc.toString("hex"),
     });
 }
@@ -410,7 +415,9 @@ function writeStore(store) {
     try {
         const ciphertext = encrypt(JSON.stringify(store));
         fs.writeFileSync(STORE_PATH, ciphertext, "utf8");
-        logger.debug(changelogMessages.STORE_WRITTEN(store.entries?.length ?? 0));
+        logger.debug(
+            changelogMessages.STORE_WRITTEN(store.entries?.length ?? 0),
+        );
     } catch (err) {
         logger.error(changelogMessages.STORE_ENCRYPT_FAILED(err.message));
         throw new AppError(CHANGELOG_ERRORS.STORE_UNAVAILABLE, 503);
@@ -427,7 +434,8 @@ class ChangelogModel {
     static listAll() {
         const { entries } = readStore();
         return [...entries].sort((a, b) => {
-            if (b.displayDate !== a.displayDate) return b.displayDate.localeCompare(a.displayDate);
+            if (b.displayDate !== a.displayDate)
+                return b.displayDate.localeCompare(a.displayDate);
             return b.createdAt.localeCompare(a.createdAt);
         });
     }
@@ -453,16 +461,16 @@ class ChangelogModel {
         const store = readStore();
         const now = new Date().toISOString();
         const entry = {
-            id:          crypto.randomUUID(),
+            id: crypto.randomUUID(),
             displayDate: data.displayDate,
-            version:     data.version,
-            title:       data.title,
-            summary:     data.summary,
-            type:        data.type,
-            authors:     Array.isArray(data.authors)   ? data.authors   : [],
-            coAuthors:   Array.isArray(data.coAuthors) ? data.coAuthors : [],
-            createdAt:   now,
-            updatedAt:   now,
+            version: data.version,
+            title: data.title,
+            summary: data.summary,
+            type: data.type,
+            authors: Array.isArray(data.authors) ? data.authors : [],
+            coAuthors: Array.isArray(data.coAuthors) ? data.coAuthors : [],
+            createdAt: now,
+            updatedAt: now,
         };
         store.entries.push(entry);
         writeStore(store);
@@ -479,9 +487,18 @@ class ChangelogModel {
     static update(id, data) {
         const store = readStore();
         const idx = store.entries.findIndex((e) => e.id === id);
-        if (idx === -1) throw new AppError(CHANGELOG_ERRORS.ENTRY_NOT_FOUND, 404);
+        if (idx === -1)
+            throw new AppError(CHANGELOG_ERRORS.ENTRY_NOT_FOUND, 404);
 
-        const ALLOWED = ["displayDate", "version", "title", "summary", "type", "authors", "coAuthors"];
+        const ALLOWED = [
+            "displayDate",
+            "version",
+            "title",
+            "summary",
+            "type",
+            "authors",
+            "coAuthors",
+        ];
         ALLOWED.forEach((key) => {
             if (data[key] !== undefined) store.entries[idx][key] = data[key];
         });
@@ -499,7 +516,8 @@ class ChangelogModel {
         const store = readStore();
         const before = store.entries.length;
         store.entries = store.entries.filter((e) => e.id !== id);
-        if (store.entries.length === before) throw new AppError(CHANGELOG_ERRORS.ENTRY_NOT_FOUND, 404);
+        if (store.entries.length === before)
+            throw new AppError(CHANGELOG_ERRORS.ENTRY_NOT_FOUND, 404);
         writeStore(store);
         logger.info(changelogMessages.ENTRY_DELETED(id));
     }
