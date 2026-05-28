@@ -11,6 +11,8 @@ const authRoutes = require("./auth.route");
 const auditLogRoutes           = require("./audit-log.route");
 const metricsRoutes            = require("./metrics.route");
 const clientRoutes             = require("./client.route");
+const changelogRoutes          = require("./changelog.route");
+
 
 // ─── Mount routes ─────────────────────────────────────────────────────────────
 
@@ -34,5 +36,8 @@ router.use("/metrics", metricsRoutes);
 
 // Client-side error ingestion (ErrorBoundary reports)
 router.use("/client", clientRoutes);
+
+// Changelog / Version History
+router.use("/changelog", changelogRoutes);
 
 module.exports = router;

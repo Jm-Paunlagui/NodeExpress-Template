@@ -15,4 +15,5 @@ module.exports = {
   ...require("./metrics.messages"),
   ...require("./client.messages"),
   ...require("./cache.messages"),
+  ...require("./changelog.messages"),
 };

@@ -202,6 +202,12 @@ const RESPONSE_MESSAGES = {
 
     // Client-side error ingestion (ErrorBoundary → POST /client/errors)
     CLIENT_ERROR_LOGGED: "Error logged successfully.",
+
+    // Changelog
+    CHANGELOG_LIST_FETCHED:    "Changelog entries fetched successfully.",
+    CHANGELOG_ENTRY_CREATED:   "Changelog entry created successfully.",
+    CHANGELOG_ENTRY_UPDATED:   "Changelog entry updated successfully.",
+    CHANGELOG_ENTRY_DELETED:   "Changelog entry deleted successfully.",
 };
 
 module.exports = {
