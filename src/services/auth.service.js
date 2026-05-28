@@ -582,11 +582,7 @@ class AuthService {
                     },
                 );
             }
-            // Also reject if the new password happens to verify against the default hash (edge case)
-            const isDefaultHash = await AuthService._checkIsDefaultPassword(
-                empAdmin.EMP_PW,
-            );
-            // isDefaultHash is already checked above via plain compare, no extra action needed
+            // The plain compare above is sufficient — no additional hash check needed here.
         }
 
         const newPwHash = await CryptoVault.hashPassword(newPassword);

@@ -64,12 +64,32 @@ class AuthMiddleware {
     // tokens uniformly — the security decision is always server-controlled.
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
       if (err) {
-        // JsonWebTokenError  → missing / malformed / tampered → 401
-        // TokenExpiredError  → session timed out              → 440
-        // NotBeforeError     → used too early                 → 403
-        const isMissing = err.name === "JsonWebTokenError";
+        // TokenExpiredError   → session timed out                       → 440
+        // NotBeforeError      → token used before its nbf claim         → 403
+        // JsonWebTokenError with missing/empty token                    → 401
+        // JsonWebTokenError with invalid signature or malformed payload → 403
         const isExpired = err.name === "TokenExpiredError";
-        const statusCode = isMissing ? 401 : isExpired ? 440 : 403;
+        const isNotBefore = err.name === "NotBeforeError";
+        const isMissingToken =
+          err.name === "JsonWebTokenError" &&
+          (token === "" ||
+            err.message?.includes("jwt must be provided") ||
+            err.message?.includes("No auth token"));
+        const isTampered =
+          err.name === "JsonWebTokenError" &&
+          !isMissingToken &&
+          (err.message?.includes("invalid signature") ||
+            err.message?.includes("jwt malformed") ||
+            err.message?.includes("Unexpected token"));
+
+        const isMissing = isMissingToken;
+
+        let statusCode;
+        if (isExpired) statusCode = 440;
+        else if (isNotBefore) statusCode = 403;
+        else if (isMissingToken) statusCode = 401;
+        else if (isTampered) statusCode = 403;
+        else statusCode = 401; // unknown JsonWebTokenError sub-type defaults to 401
 
         if (isFileDownload) {
           const title = isMissing

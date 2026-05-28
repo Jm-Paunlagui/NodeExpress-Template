@@ -29,7 +29,7 @@ class AuditLogController {
     const { requestId } = req.params;
     const { date }      = req.query;
     const data = await AuditLogService.getRequestLogs(requestId, date);
-    res.json(sendSuccess('Request log trace fetched', data));
+    res.json(sendSuccess(RESPONSE_MESSAGES.AUDIT_LOG_TRACE_FETCHED, data));
   });
 
   /**
@@ -60,8 +60,11 @@ class AuditLogController {
   static exportExcel = catchAsync(async (req, res) => {
     const { fromDate, toDate } = req.query;
     const buffer = await AuditLogService.exportToExcel({ fromDate, toDate });
+    // Sanitize date strings before interpolating into header (CWE-113).
+    const safeFrom = String(fromDate).replace(/[^0-9\-]/g, '');
+    const safeTo = String(toDate).replace(/[^0-9\-]/g, '');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${fromDate}-to-${toDate}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${safeFrom}-to-${safeTo}.xlsx"`);
     res.send(buffer);
   });
 
@@ -75,8 +78,11 @@ class AuditLogController {
   static exportLogs = catchAsync(async (req, res) => {
     const { fromDate, toDate } = req.query;
     const buffer = await AuditLogService.exportToZip({ fromDate, toDate });
+    // Sanitize date strings before interpolating into header (CWE-113).
+    const safeFrom = String(fromDate).replace(/[^0-9\-]/g, '');
+    const safeTo = String(toDate).replace(/[^0-9\-]/g, '');
     res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="server-logs-${fromDate}-to-${toDate}.zip"`);
+    res.setHeader('Content-Disposition', `attachment; filename="server-logs-${safeFrom}-to-${safeTo}.zip"`);
     res.send(buffer);
   });
 

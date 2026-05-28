@@ -23,6 +23,7 @@ class AuditLogMiddleware {
         ? process.env.AUDIT_LOG_EXCLUDE_PATHS.split(',').map((p) => p.trim())
         : ['/api/v1/audit-logs']
     );
+    this.handle = this.handle.bind(this);
   }
 
   handle(req, res, next) {

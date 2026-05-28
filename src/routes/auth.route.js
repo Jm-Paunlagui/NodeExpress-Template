@@ -13,12 +13,12 @@ const {
 
 router.post(
   "/login",
-  authRateLimiter.handle,
+  authRateLimiter.handle.bind(authRateLimiter),
   AuthMiddleware.validateRequiredFields(["userId", "password"]),
   AuthController.login,
 );
 
-router.post("/refresh", authRateLimiter.handle, AuthController.refresh);
+router.post("/refresh", authRateLimiter.handle.bind(authRateLimiter), AuthController.refresh);
 
 // ── Protected endpoints ───────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ router.get("/me", AuthMiddleware.authenticate, AuthController.me);
 // current-password verification step.
 router.patch(
   "/change-password",
-  authRateLimiter.handle,
+  authRateLimiter.handle.bind(authRateLimiter),
   AuthMiddleware.authenticate,
   AuthMiddleware.validateRequiredFields(["currentPassword", "newPassword"]),
   AuthController.changePassword,

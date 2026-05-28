@@ -210,7 +210,7 @@ const defaultRateLimiter = new RateLimiterMiddleware({
 });
 
 const authRateLimiter = new RateLimiterMiddleware({
-  max: 10,
+  max: 5,
   windowMs: 15 * 60 * 1000,
   label: "RateLimit:auth",
   onLimit: (req, res, { retryAfter }) =>

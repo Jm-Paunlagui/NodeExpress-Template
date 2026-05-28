@@ -24,6 +24,16 @@ const middlewareMessages = {
     `CSRF refresh attempted without an existing cookie by user ${userId}.`,
   CSRF_REFRESH_FAILED: (userId) =>
     `Failed to refresh CSRF token for user ${userId}.`,
+
+  // SecurityFilterMiddleware — specific message templates
+  MALICIOUS_REQUEST_BLOCKED: (ip, method, path) =>
+    `Blocked malicious request — ${method} ${path} from ${ip}.`,
+  HTTP_METHOD_BLOCKED: (ip, method, path) =>
+    `Blocked suspicious HTTP method: ${method} ${path} from ${ip}.`,
+  IP_BLOCKED_SUSPICIOUS: (ip, method, path) =>
+    `Request from blocked IP — ${method} ${path} from ${ip}.`,
+  REQUEST_ALLOWED: (ip, method, path) =>
+    `Security filter passed — ${method} ${path} from ${ip}.`,
 };
 
 module.exports = { middlewareMessages };

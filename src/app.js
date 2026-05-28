@@ -84,7 +84,7 @@ app.use(defaultSecurityFilter.handle.bind(defaultSecurityFilter));
 app.use(defaultTraceability.handle.bind(defaultTraceability)); // lgtm[js/missing-rate-limiting] Rate limiting is enforced by RateLimiterMiddleware (step 12)
 
 // 3a. Audit log DB persistence — fires after res.end via setImmediate
-app.use(defaultAuditLog.handle.bind(defaultAuditLog));
+app.use(defaultAuditLog.handle);
 
 // 4. Body parsing — must be before route handlers so req.body is available
 app.use(defaultBodyParser.jsonHandler);

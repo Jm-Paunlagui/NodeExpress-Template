@@ -120,12 +120,12 @@ class AuditLogService {
     const agg = await AuditLogModel.aggregate(matchFilter);
 
     const successRate = agg.total > 0
-      ? ((agg.success + agg.redirect) / agg.total * 100).toFixed(1)
-      : '0.0';
+      ? parseFloat(((agg.success + agg.redirect) / agg.total * 100).toFixed(1))
+      : 0.0;
 
     const errorRate = agg.total > 0
-      ? ((agg.clientError + agg.serverError) / agg.total * 100).toFixed(1)
-      : '0.0';
+      ? parseFloat(((agg.clientError + agg.serverError) / agg.total * 100).toFixed(1))
+      : 0.0;
 
     logger.info(auditLogMessages.STATS_FETCHED(resolvedFromDate.toISOString(), resolvedToDate.toISOString()));
 
@@ -156,10 +156,10 @@ class AuditLogService {
    */
   static async getRequestLogs(requestId, dateStr) {
     if (!requestId || !/^req_[A-Za-z0-9_-]{1,30}$/.test(requestId)) {
-      throw new AppError('Invalid request ID format', 400);
+      throw new AppError(AUDIT_LOG_ERRORS.AUDIT_LOG_INVALID_REQUEST_ID, 400);
     }
     if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      throw new AppError('Invalid date — expected YYYY-MM-DD', 400);
+      throw new AppError(AUDIT_LOG_ERRORS.AUDIT_LOG_INVALID_DATE_FORMAT, 400);
     }
 
     const [year, month, day] = dateStr.split('-');
@@ -313,10 +313,10 @@ class AuditLogService {
    */
   static async exportTraceExcel(requestId, dateStr) {
     if (!requestId || !/^req_[A-Za-z0-9_-]{1,30}$/.test(requestId)) {
-      throw new AppError('Invalid request ID format', 400);
+      throw new AppError(AUDIT_LOG_ERRORS.AUDIT_LOG_INVALID_REQUEST_ID, 400);
     }
     if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      throw new AppError('Invalid date — expected YYYY-MM-DD', 400);
+      throw new AppError(AUDIT_LOG_ERRORS.AUDIT_LOG_INVALID_DATE_FORMAT, 400);
     }
 
     logger.info(auditLogMessages.EXPORT_TRACE_STARTED(requestId));
@@ -328,7 +328,7 @@ class AuditLogService {
     ]);
 
     if (!dbRow) {
-      throw new AppError(`No audit log record found for request ID: ${requestId}`, 404);
+      throw new AppError(AUDIT_LOG_ERRORS.AUDIT_LOG_TRACE_NOT_FOUND, 404);
     }
 
     // ── Phase detection helpers (mirrors frontend detectPhase) ──
@@ -437,7 +437,7 @@ class AuditLogService {
       pass.on('end',   ()      => resolve(Buffer.concat(chunks)));
       pass.on('error', reject);
 
-      const archive = new archiver.ZipArchive({ zlib: { level: 9 } });
+      const archive = archiver('zip', { zlib: { level: 9 } });
       archive.on('error', reject);
       archive.pipe(pass);
 

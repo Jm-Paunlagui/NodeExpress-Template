@@ -9,6 +9,7 @@
 
 const { logger } = require("../../utils/logger");
 const { getStatusTitle } = require("../../constants/responses");
+const { middlewareMessages } = require("../../constants/messages/middleware.messages");
 
 class SecurityFilterMiddleware {
   constructor(options = {}) {
@@ -62,10 +63,11 @@ class SecurityFilterMiddleware {
       /\/hb1\//,
     ];
 
-    this._whitelistedPaths = options.whitelistedPaths ?? [
+    // _methodWhitelistedPaths: these paths are exempt from the blocked-method check only.
+    // Malicious pattern checking always runs regardless of path (H-05).
+    this._methodWhitelistedPaths = options.methodWhitelistedPaths ?? [
       /^\/$/,
       /^\/health$/,
-      /^\/api\//,
       /^\/api-docs/,
     ];
 
@@ -97,31 +99,24 @@ class SecurityFilterMiddleware {
     const reqPath = req.path;
     const method = req.method;
 
-    if (this._whitelistedPaths.some((p) => p.test(reqPath))) return next();
-
+    // Always check if IP is currently blocked (applies to all paths).
     const record = this._suspiciousIPs.get(ip);
     if (record && record.blockedUntil > Date.now()) {
-      logger.debug("Request from blocked IP", {
-        ip,
-        method,
-        path: reqPath,
-      });
+      logger.warning(middlewareMessages.IP_BLOCKED_SUSPICIOUS(ip, method, reqPath));
       return res.status(403).json({
         status: "error",
         code: 403,
         title: getStatusTitle(403),
         message: "Forbidden",
-        error: { type: "Forbidden" },
+        error: { type: "ForbiddenError" },
       });
     }
 
-    if (this._blockedMethods.has(method)) {
+    // Blocked method check — skip only for health/root paths (not all /api/ paths).
+    const isMethodWhitelisted = this._methodWhitelistedPaths.some((p) => p.test(reqPath));
+    if (!isMethodWhitelisted && this._blockedMethods.has(method)) {
       this._trackSuspiciousIP(ip);
-      logger.warning("Blocked suspicious HTTP method", {
-        ip,
-        method,
-        path: reqPath,
-      });
+      logger.warning(middlewareMessages.HTTP_METHOD_BLOCKED(ip, method, reqPath));
       return res.status(405).json({
         status: "error",
         code: 405,
@@ -131,13 +126,10 @@ class SecurityFilterMiddleware {
       });
     }
 
+    // Malicious pattern check — always runs regardless of path (H-05).
     if (this._maliciousPatterns.some((p) => p.test(reqPath))) {
       this._trackSuspiciousIP(ip);
-      logger.debug("Blocked malicious request", {
-        ip,
-        method,
-        path: reqPath,
-      });
+      logger.warning(middlewareMessages.MALICIOUS_REQUEST_BLOCKED(ip, method, reqPath));
       return res.status(404).json({
         status: "error",
         code: 404,
@@ -195,10 +187,8 @@ class SecurityFilterMiddleware {
 
     if (record.count >= this._suspiciousThreshold) {
       record.blockedUntil = now + this._blockDurationMs;
-      logger.warning("IP blocked due to suspicious activity", {
-        ip,
+      logger.warning(middlewareMessages.SUSPICIOUS_IP_BLOCKED(ip, new Date(record.blockedUntil).toISOString()), {
         requestCount: record.count,
-        blockedUntil: new Date(record.blockedUntil).toISOString(),
       });
     }
 

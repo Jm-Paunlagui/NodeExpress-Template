@@ -181,6 +181,12 @@ const METRICS_ERRORS = {
 const AUDIT_LOG_ERRORS = {
     INVALID_DATE_RANGE:
         "Invalid date range. fromDate must be before toDate and both must be valid ISO dates.",
+    AUDIT_LOG_TRACE_NOT_FOUND:
+        "No audit log record found for the requested ID.",
+    AUDIT_LOG_INVALID_REQUEST_ID:
+        "Invalid request ID format.",
+    AUDIT_LOG_INVALID_DATE_FORMAT:
+        "Invalid date — expected YYYY-MM-DD.",
 };
 
 // ─── Subsidy Management error messages ───────────────────────────────────────

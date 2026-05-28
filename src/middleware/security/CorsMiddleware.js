@@ -20,11 +20,11 @@ class CorsMiddleware {
         : []);
 
     this._dynamicPatterns = options.patterns ?? [
-      /^https?:\/\/localhost:\d+$/,
-      /^https?:\/\/127\.0\.0\.1:\d+$/,
-      /^https?:\/\/192\.168\.\d+\.\d+:\d+$/,
-      /^https?:\/\/10\.\d+\.\d+\.\d+:\d+$/,
-      /^https?:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+:\d+$/,
+      /^https?:\/\/localhost(:\d+)?$/,
+      /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+      /^https?:\/\/192\.168\.\d+\.\d+(:\d+)?$/,
+      /^https?:\/\/10\.\d+\.\d+\.\d+(:\d+)?$/,
+      /^https?:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+(:\d+)?$/,
       /^https?:\/\/.+\.local(:\d+)?$/,
       /^https?:\/\/.+\.lan(:\d+)?$/,
       /^https?:\/\/.+\.corp(\..+)?$/i,

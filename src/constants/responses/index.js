@@ -62,12 +62,14 @@ function getStatusTitle(code) {
  * Build a standard success response body.
  * @param {string} message
  * @param {*} [data]
+ * @param {number} [code=200] - HTTP status code to include in the response body.
+ *   Pass 201 for resource-creation responses (res.status(201).json(sendSuccess(..., ..., 201))).
  * @returns {{ status: string, code: number, message: string, data: * }}
  */
-function sendSuccess(message, data = null) {
+function sendSuccess(message, data = null, code = 200) {
     return {
         status: "success",
-        code: 200,
+        code,
         message,
         data,
     };
@@ -187,9 +189,10 @@ const RESPONSE_MESSAGES = {
     PAYROLL_EXPORT_FETCHED:   "Payroll deduction export fetched successfully.",
 
     // Audit Log
-    AUDIT_LOG_LIST_FETCHED:  "Audit log records fetched successfully.",
-    AUDIT_LOG_STATS_FETCHED: "Audit log statistics fetched successfully.",
-    AUDIT_LOG_DELETED:       "Audit log records and server log files permanently deleted.",
+    AUDIT_LOG_LIST_FETCHED:   "Audit log records fetched successfully.",
+    AUDIT_LOG_STATS_FETCHED:  "Audit log statistics fetched successfully.",
+    AUDIT_LOG_DELETED:        "Audit log records and server log files permanently deleted.",
+    AUDIT_LOG_TRACE_FETCHED:  "Request log trace fetched.",
 
     // Metrics
     METRICS_FETCHED:           "Metrics snapshot retrieved successfully.",

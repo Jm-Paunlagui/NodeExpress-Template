@@ -251,7 +251,7 @@ Old `auth.js` had hardcoded `AREAS` and `ROLES` constants. Every project had dif
 
 ### New Design: Dynamic Permission Model
 
-Permissions are **data-driven**, not hardcoded. JWT payload carries `role` string (e.g. `"USER"`, `"ADMIN"`, `"SUPER_ADMIN"`, `"VIEWER"`, `"APPROVER"`, `"ROBOT"`) and optional `permissions` array. `requireAccess` factory accepts **predicate function** receiving decoded user, returns `true/false`.
+Permissions are **data-driven**, not hardcoded. JWT payload carries `permissions` array (or `userLevel` number). `requireAccess` factory accepts **predicate function** receiving decoded user, returns `true/false`.
 
 ```js
 // ✅ CORRECT — Dynamic access control
@@ -281,7 +281,7 @@ class AuthMiddleware {
 router.get(
   "/report",
   AuthMiddleware.authenticate,
-  AuthMiddleware.requireAccess((user) => ["ADMIN", "SUPER_ADMIN"].includes(user.role)),
+  AuthMiddleware.requireAccess((user) => user.userLevel >= 2),
   ReportController.get,
 );
 
@@ -301,7 +301,7 @@ router.delete(
   "/admin",
   AuthMiddleware.authenticate,
   AuthMiddleware.requireAccess(
-    (user) => user.role === "SUPER_ADMIN" && user.permissions?.includes("DELETE_USERS"),
+    (user) => user.userLevel >= 3 && user.permissions?.includes("DELETE_USERS"),
   ),
   AdminController.deleteUser,
 );
@@ -312,13 +312,46 @@ router.delete(
 - No `AREAS` or `ROLES` constants in template — belong to consuming application
 - Template ships **mechanism**, not hard-coded permission set
 - Each route documents own access requirement inline — no mystery
-- Role strings are uppercase: `"ROBOT"`, `"USER"`, `"ADMIN"`, `"SUPER_ADMIN"`, `"VIEWER"`, `"APPROVER"` — must match `T_EMP_MGMT_ADMIN.EMP_ROLE` exactly
+- Backwards-compatible: `user.userLevel >= N` still works for simple projects
 
 ---
 
 ## Logger — Usage Rules
 
 `src/utils/logger.js` is **only** logger in application. **Never use `console.log`, `console.error`, or any other logging mechanism in production code.**
+
+> **v5.0.0 — 2026-05-21:** Logger upgraded from 4-level to RFC 5424 8-level hierarchy.
+> `logger.warn(...)` was renamed to `logger.warning(...)` at all call sites.
+> `logger.warn` is retained as a **deprecated alias** for backward compatibility — it still works
+> but all new code must use `logger.warning(...)`. The alias will be removed in v6.
+
+---
+
+### RFC 5424 Level Hierarchy
+
+| Priority | Level name | Method call | When to use |
+|----------|-----------|-------------|-------------|
+| 0 | EMERG | `logger.emerg(...)` | System is unusable — unrecoverable panic. Should never occur in a running process. |
+| 1 | ALERT | `logger.alert(...)` | Action must be taken immediately. E.g. DB pool completely down, critical dependency unreachable. |
+| 2 | CRIT | `logger.crit(...)` | Critical conditions. E.g. health check hard failure, certificate expiry, disk full. |
+| 3 | ERROR | `logger.error(...)` | Recoverable error conditions. E.g. a request failed, a query threw, an external call timed out. |
+| 4 | WARNING | `logger.warning(...)` | Warning conditions — something unexpected but non-fatal. E.g. slow pool, rate limit hit, CORS blocked. |
+| 5 | NOTICE | `logger.notice(...)` | Normal but significant events. E.g. server startup complete, configuration change, admin action. |
+| 6 | INFO | `logger.info(...)` | Routine informational messages. E.g. request handled, cache hit, pool created. |
+| 7 | DEBUG | `logger.debug(...)` | Verbose diagnostic detail. Only emitted when `LOG_LEVEL=DEBUG`. |
+
+**Priority rule:** A log at RFC 5424 level N is written when `N <= currentLevel`. Lower number = higher priority = always shown. `LOG_LEVEL=INFO` (default) shows levels 0–6 and suppresses 7.
+
+**Backward-compat mapping:**
+
+| Old call (pre-v5) | New call (v5+) | Notes |
+|-------------------|----------------|-------|
+| `logger.error(...)` | `logger.error(...)` | Same name, now priority 3 |
+| `logger.warn(...)` | `logger.warning(...)` | Renamed — `warn` is deprecated alias |
+| `logger.info(...)` | `logger.info(...)` | Same name, now priority 6 |
+| `logger.debug(...)` | `logger.debug(...)` | Same name, now priority 7 |
+
+---
 
 ### Log Format
 
@@ -353,22 +386,26 @@ Client request complete:
 ```js
 const { logger } = require("../utils/logger");
 
-// General purpose
-logger.info("Message", { key: "value" });
-logger.warn("Message", { key: "value" });
-logger.error("Message", { key: "value", stack: err.stack });
-logger.debug("Message", { key: "value" });
+// RFC 5424 levels — use the right level for the right condition
+logger.emerg("Database cluster unreachable — process cannot continue");
+logger.alert("Connection pool completely exhausted — immediate action required");
+logger.crit("Health check hard failure", { subsystem: "oracle", pool: "userAccount" });
+logger.error("Query failed", { table: "T_OPITS_USERS", err: err.message });
+logger.warning("Slow pool response", { connectionName, elapsed });   // ← NOT logger.warn()
+logger.notice("Server startup complete", { port: 3000, env: "production" });
+logger.info("Request handled", { route: "/api/v1/health", ms: 12 });
+logger.debug("Cache key resolved", { key: "users:page:1:limit:20" });
 
-// HTTP request lifecycle (attach client machine identifier automatically)
+// HTTP request lifecycle (attaches client machine identifier automatically)
 logger.logIncomingRequest(req);
 logger.logHandlingRequest(req, { userId: 12345 });
 logger.logCompletedRequest(req, res, durationMs);
 
-// Specialized
-logger.cache("GET", "cache:users:42", "HIT", 3); // cache op
-logger.database("SELECT", "USERS", 12, 5); // db op
-logger.performance("generateReport", 4200, { rows: 50000 }); // slow op warning
-logger.security("IP_BLOCKED", { ip: "10.0.0.1" }); // security event
+// Specialized convenience methods (internally route to correct RFC level)
+logger.cache("GET", "cache:users:42", "HIT", 3);          // → DEBUG
+logger.database("SELECT", "USERS", 12, 5);                 // → DEBUG
+logger.performance("generateReport", 4200, { rows: 50000 }); // → WARNING if > 5 000ms, else INFO
+logger.security("IP_BLOCKED", { ip: "10.0.0.1" });        // → WARNING
 ```
 
 ### Logger Integration in Classes
@@ -396,6 +433,55 @@ class OracleAdapter {
 ```
 
 **Rule:** All log message template strings (e.g. `POOL_CREATING(name)`) live in `constants/messages/oracle.messages.js` — never inline strings in class methods.
+
+### Choosing the Right Level — Canonical Decision Rules
+
+Apply in this priority order:
+
+| # | Condition | Level |
+|---|-----------|-------|
+| 1 | Server lifecycle events: process start, graceful shutdown begin/end, config loaded, pool initialised, cron scheduled | `notice` |
+| 2 | Catch block — Oracle adapter / DB pool / connection errors (all retries exhausted, pool marked unhealthy) | `crit` |
+| 3 | Catch block — cert expiry, health-check hard fail, external payment gateway total failure | `crit` |
+| 4 | Catch block — expected business error (record not found, auth failed, validation rejected, email missing) | `warning` |
+| 5 | Catch block — unexpected application error (unhandled exception, null deref, contract violation) | `error` |
+| 6 | Catch block inside retry logic — first attempt failed, retrying | `warning` |
+| 7 | Catch block inside retry logic — all retries exhausted | `error` or `crit` depending on subsystem |
+| 8 | Routine mid-flow checkpoints ("fetching records", "found N rows", "cache hit", "processing request") | `info` |
+| 9 | Deprecated API called, optional env var missing, optional config oddity, non-fatal config issue, fallback used | `warning` |
+| 10 | Scheduled job start/finish, pool recovered after failures | `notice` |
+
+**Quick reference:**
+
+```
+System is unusable / process will die            →  emerg
+Immediate human action required (pool gone)      →  alert
+Critical subsystem failure (pool init, crit err) →  crit
+Request or operation failed (unexpected)         →  error
+Unexpected but recoverable / expected bad path   →  warning   ← always logger.warning(), NOT logger.warn()
+Normal significant lifecycle event               →  notice
+Routine operational trace                        →  info
+Verbose diagnostic (local dev only)              →  debug
+```
+
+**Common patterns established in this codebase:**
+
+- Oracle pool init/teardown events → `notice`
+- Pool creation failure (all retries exhausted) → `crit`
+- Individual pool retry failure → `warning`
+- Pool health check failure → `warning`; pool marked unhealthy → `crit`
+- DB connection operation failure → `crit` (infrastructure)
+- DB rollback/close failure → `warning` (non-fatal secondary error)
+- Batch operation per-item failure → `warning` (partial failure, not system failure)
+- Auth failures (bad credentials, lockout, tampered signature) → `warning`
+- CORS blocked, rate limit exceeded, IP blocked → `warning`
+- Email send failed in fire-and-forget `.catch()` → `warning` (business op already succeeded)
+- Email send failed in direct `.catch()` that rethrows → `error`
+- Worker process died (cluster mode) → `warning`
+- Server startup/shutdown → `notice`
+- oracledb driver loaded → `notice`
+- Nanoid fallback used → `warning`; crypto fallback used → `warning`
+- Console manager init → `notice`
 
 ---
 
@@ -1133,7 +1219,7 @@ const jwt = require("jsonwebtoken");
 
 function signToken(payload = {}, expiresIn = "1h") {
   return jwt.sign(
-    { sub: "test-user", role: "USER", ...payload },
+    { sub: "test-user", userLevel: 1, ...payload },
     process.env.JWT_SECRET || "test-secret",
     { expiresIn },
   );
@@ -1291,10 +1377,10 @@ describe("Auth Security", function () {
 
     it("returns 403 for a token with a tampered payload", async function () {
       // Sign a valid token, then corrupt the payload segment
-      const valid = signToken({ role: "USER" });
+      const valid = signToken({ userLevel: 1 });
       const parts = valid.split(".");
       parts[1] = Buffer.from(
-        JSON.stringify({ sub: "hacker", role: "SUPER_ADMIN" }),
+        JSON.stringify({ sub: "hacker", userLevel: 99 }),
       ).toString("base64url");
       const tampered = parts.join(".");
       const res = await agent
@@ -1305,9 +1391,9 @@ describe("Auth Security", function () {
   });
 
   describe("authorization (permission level)", function () {
-    it("returns 403 when role is insufficient for the route", async function () {
-      // Route requires ADMIN or SUPER_ADMIN; token carries USER role
-      const token = signToken({ role: "USER" });
+    it("returns 403 when user level is below route requirement", async function () {
+      // Route requires userLevel >= 2; token has userLevel 1
+      const token = signToken({ userLevel: 1 });
       const res = await agent
         .get("/api/v1/admin/dashboard")
         .set("Authorization", `Bearer ${token}`);

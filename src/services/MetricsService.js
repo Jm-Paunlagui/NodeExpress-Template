@@ -209,27 +209,31 @@ class MetricsService {
 
             if (event.type === "vital") {
                 metricsStore.recordFrontendVital(
-                    String(event.name || "UNKNOWN"),
+                    String(event.name || "UNKNOWN").slice(0, 200),
                     Number(event.value) || 0,
-                    String(event.rating || "unknown"),
+                    String(event.rating || "unknown").slice(0, 50),
                     event.context || {},
                 );
                 vitalCount++;
                 logger.debug(metricsMessages.FRONTEND_INGESTED(1), {
                     eventType: "vital",
-                    name: event.name,
+                    name: String(event.name || "UNKNOWN").slice(0, 200),
+                    url: String(event.url || "").slice(0, 500),
+                    component: String(event.component || "").slice(0, 200),
                     rating: event.rating,
                 });
             } else if (event.type === "error") {
                 metricsStore.recordFrontendError(
-                    String(event.message || ""),
-                    String(event.stack || ""),
+                    String(event.message || "").slice(0, 500),
+                    String(event.stack || "").slice(0, 2000),
                     event.context || {},
                 );
                 errorCount++;
                 logger.notice(metricsMessages.FRONTEND_INGESTED(1), {
                     eventType: "error",
-                    message: String(event.message || "").slice(0, 200),
+                    message: String(event.message || "").slice(0, 500),
+                    url: String(event.url || "").slice(0, 500),
+                    component: String(event.component || "").slice(0, 200),
                 });
             }
         }

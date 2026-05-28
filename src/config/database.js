@@ -85,10 +85,20 @@ function getConnectionNames() {
   return Object.keys(connections);
 }
 
+/**
+ * Pool name constants — single source of truth for all named pool references.
+ * Use these instead of magic strings in route files, health checks, etc.
+ */
+const POOL_NAMES = {
+  USER_ACCOUNT: "userAccount",
+  MEAL: "Meal",
+};
+
 module.exports = {
   connections,
   getConnectionConfig,
   getConnectionNames,
+  POOL_NAMES,
   // isDevelopment,
   buildSimpleConnectString,
   buildTNSConnectString,

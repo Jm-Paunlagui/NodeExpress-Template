@@ -41,6 +41,7 @@ class IpFilterMiddleware {
         code: 403,
         title: getStatusTitle(403),
         message: "Access denied",
+        error: { type: "ForbiddenError" },
       });
     }
 

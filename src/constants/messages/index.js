@@ -14,4 +14,5 @@ module.exports = {
   ...require("./auditLog.messages"),
   ...require("./metrics.messages"),
   ...require("./client.messages"),
+  ...require("./cache.messages"),
 };

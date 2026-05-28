@@ -152,11 +152,13 @@ class ErrorHandlerMiddleware {
       return { statusCode: 400, message: err.message, type: "ValidationError" };
     }
 
-    // 5. Fallback — preserve any explicit status code from the error
+    // 5. Fallback — preserve any explicit status code from the error.
+    // In production, never expose internal class names via err.name (M-04).
+    const isProd = process.env.NODE_ENV === "production";
     return {
       statusCode: err.statusCode || err.status || 500,
       message: "Internal server error",
-      type: err.name || "Error",
+      type: isProd ? "InternalError" : (err.name || "Error"),
       rawMessage: err.message,
     };
   }

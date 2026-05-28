@@ -41,6 +41,7 @@
  */
 
 const { logger } = require("../../utils/logger");
+const { cacheMessages } = require("../../constants/messages/cache.messages");
 
 class CacheMiddleware {
   // ─── Read-through (cache-aside) ───────────────────────────────────────────
@@ -81,9 +82,7 @@ class CacheMiddleware {
       try {
         key = keyFn(req);
       } catch (err) {
-        logger.warning(
-          `Cache BYPASS — store: ${store.name}, keyFn threw, falling through to controller: ${err.message}`,
-        );
+        logger.warning(cacheMessages.CACHE_BYPASS(store.name, err.message));
         return next();
       }
 
@@ -94,7 +93,7 @@ class CacheMiddleware {
           res.set("X-Cache", "HIT");
           res.set("X-Cache-Key", key);
         }
-        logger.info(`Cache HIT — store: ${store.name}, key: ${key}`);
+        logger.info(cacheMessages.CACHE_HIT(store.name, key));
         return res.json(cached);
       }
 
@@ -103,7 +102,7 @@ class CacheMiddleware {
         res.set("X-Cache", "MISS");
         res.set("X-Cache-Key", key);
       }
-      logger.info(`Cache MISS — store: ${store.name}, key: ${key}`);
+      logger.info(cacheMessages.CACHE_MISS(store.name, key));
 
       const originalJson = res.json.bind(res);
       res.json = function (data) {
@@ -163,21 +162,15 @@ class CacheMiddleware {
               for (const s of stores) {
                 if (usePattern) {
                   const count = s.delByPattern(String(target));
-                  logger.info(
-                    `Cache INVALIDATE — store: ${s.name}, pattern: "${target}", ${count} key(s) removed`,
-                  );
+                  logger.info(cacheMessages.CACHE_INVALIDATE_PATTERN(s.name, String(target), count));
                 } else {
                   const keys = Array.isArray(target) ? target : [target];
                   const count = s.del(keys);
-                  logger.info(
-                    `Cache INVALIDATE — store: ${s.name}, keys: [${keys.join(", ")}], ${count} key(s) removed`,
-                  );
+                  logger.info(cacheMessages.CACHE_INVALIDATE(s.name, keys.join(", "), count));
                 }
               }
             } catch (err) {
-              logger.error(
-                `Cache INVALIDATE ERROR — keyFn threw: ${err.message}`,
-              );
+              logger.error(cacheMessages.CACHE_ERROR(err.message));
             }
           });
         }
@@ -211,14 +204,10 @@ class CacheMiddleware {
             try {
               for (const s of stores) {
                 const count = s.delWhere((key) => predicateFn(key, req));
-                logger.info(
-                  `Cache INVALIDATE — store: ${s.name}, predicate match, ${count} key(s) removed`,
-                );
+                logger.info(cacheMessages.CACHE_INVALIDATE_WHERE(s.name, count));
               }
             } catch (err) {
-              logger.error(
-                `Cache INVALIDATE ERROR — predicateFn threw: ${err.message}`,
-              );
+              logger.error(cacheMessages.CACHE_PREDICATE_ERROR(err.message));
             }
           });
         }
