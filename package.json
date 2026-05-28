@@ -27,6 +27,7 @@
         "test:summary": "mocha --file test/server/setup.js \"test/server/**/*.test.js\" --timeout 30000 --exit --recursive --reporter min"
     },
     "dependencies": {
+        "archiver": "^8.0.0",
         "argon2": "^0.44.0",
         "argon2id": "^1.0.1",
         "axios": "^1.14.0",
@@ -45,12 +46,14 @@
         "helmet": "^8.1.0",
         "jsonwebtoken": "^9.0.3",
         "morgan": "^1.10.1",
+        "multer": "^2.1.1",
         "nanoid": "^5.1.7",
         "node-cache": "^5.1.2",
         "nodemailer": "^8.0.4",
         "oracledb": "^6.10.0",
         "pdfkit": "^0.18.0",
-        "uuid": "^13.0.0"
+        "uuid": "^13.0.0",
+        "xlsx": "^0.18.5"
     },
     "bin": {
         "meal_backend": "./server.js"

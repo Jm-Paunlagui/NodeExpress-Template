@@ -1,14 +1,18 @@
 /**
- * @fileoverview Enterprise Logging System with File Rotation
- * @description Comprehensive logging solution with automatic file rotation and organized directory structure
+ * @fileoverview Enterprise Logging System with RFC 5424 Syslog Levels and File Rotation
+ * @description Comprehensive logging solution with RFC 5424 severity levels, automatic
+ *   file rotation, and organized directory structure. Levels follow priority 0 (highest)
+ *   to 7 (lowest) — emergency, alert, critical, error, warning, notice, info, debug.
  * @author Jm-Paunlagui
- * @version 4.0.0
- * @since 2025-08-16
+ * @version 5.0.0
+ * @since v4.0.0 2025-08-16 — initial four-level logger
+ * @since v5.0.0 2026-05-21 — RFC 5424 eight-level expansion (emergency/alert/critical/notice added)
  */
 
 const fs = require("fs").promises;
 const path = require("path");
 const os = require("os");
+const { requestContext } = require("./requestContext");
 
 class Logger {
     // ========================================
@@ -18,18 +22,36 @@ class Logger {
     static CONFIG = {
         MAX_FILE_SIZE: 50 * 1024 * 1024,
 
+        /**
+         * RFC 5424 syslog numeric priorities.
+         * Lower number = higher priority. A log at level N is written when N <= currentLevel.
+         * Backward-compatible mapping:
+         *   Old ERROR:0 → ERROR:3, Old WARN:1 → WARNING:4, Old INFO:2 → INFO:6, Old DEBUG:3 → DEBUG:7
+         */
         LEVELS: {
-            ERROR: 0,
-            WARN: 1,
-            INFO: 2,
-            DEBUG: 3,
+            EMERGENCY: 0, // System is unusable — panic, should never occur in a running process
+            ALERT: 1, // Action must be taken immediately (e.g. DB pool completely down)
+            CRITICAL: 2, // critical conditions (e.g. health check hard failure, cert expiry)
+            ERROR: 3, // Error conditions (formerly ERROR:0)
+            WARNING: 4, // Warning conditions (formerly WARN:1)
+            NOTICE: 5, // Normal but significant condition (startup complete, config change)
+            INFO: 6, // Informational (formerly INFO:2)
+            DEBUG: 7, // Debug-level messages (formerly DEBUG:3)
         },
 
         COLORS: {
+            // RFC 5424 new levels
+            EMERGENCY: "\x1b[105m", // Bright magenta background — highest severity
+            ALERT: "\x1b[105m", // Bright magenta background — critical alert
+            CRITICAL: "\x1b[91m", // Bright red — critical condition
+            NOTICE: "\x1b[97m", // Bright white — normal but significant
+            // Existing levels (kept identical)
             ERROR: "\x1b[31m",
-            WARN: "\x1b[33m",
+            WARNING: "\x1b[33m",
+            WARN: "\x1b[33m", // Alias for internal lookups that still use WARN key
             INFO: "\x1b[36m",
             DEBUG: "\x1b[35m",
+            // Structural
             MACHINE_ID: "\x1b[94m",
             TIMESTAMP: "\x1b[90m",
             PID: "\x1b[92m",
@@ -44,14 +66,19 @@ class Logger {
 
         LOG_BASE_DIR: path.join(process.cwd(), "logs"),
 
+        /**
+         * Accepts all 8 RFC 5424 level names case-insensitively.
+         * Also accepts legacy "WARN" as alias for "WARNING".
+         * Default: INFO (numeric 6).
+         */
         CURRENT_LEVEL: process.env.LOG_LEVEL || "INFO",
 
         CONSOLE_OUTPUT:
             process.env.ENABLE_CONSOLE_LOGS === "false"
                 ? false
                 : process.env.ENABLE_CONSOLE_LOGS === "true" ||
-            process.env.NODE_ENV !== "production" ||
-            process.env.DOCKER_CONTAINER === "true",
+                  process.env.NODE_ENV !== "production" ||
+                  process.env.DOCKER_CONTAINER === "true",
 
         EXCLUDED_URLS: [
             ...(process.env.LOG_EXCLUDE_HEALTH === "true" ? ["/health"] : []),
@@ -81,9 +108,13 @@ class Logger {
     // ========================================
 
     constructor() {
+        // Normalize WARN → WARNING for backward compatibility with env vars
+        const rawLevel = (Logger.CONFIG.CURRENT_LEVEL || "INFO").toUpperCase();
+        const normalizedLevel = rawLevel === "WARN" ? "WARNING" : rawLevel;
+
         this.currentLevel =
-            Logger.CONFIG.LEVELS[Logger.CONFIG.CURRENT_LEVEL.toUpperCase()] ??
-            Logger.CONFIG.LEVELS.INFO;
+            Logger.CONFIG.LEVELS[normalizedLevel] ?? Logger.CONFIG.LEVELS.INFO;
+
         this._maxSafeStrLength = Logger.CONFIG.MAX_SAFESTR_LENGTH;
         this.writeQueue = [];
         this.isWriting = false;
@@ -337,7 +368,7 @@ class Logger {
     /**
      * Build the plain-text log entry string
      */
-    #formatMessage(level, message, meta = {}) {
+    #formatMessage(level, message, meta = {}, requestId = null) {
         const { timestamp } = this.#getDateComponents();
         const cleanMessage = this.#resolveMessage(message);
         const { displayFn, displayFile, displayLine } =
@@ -352,6 +383,8 @@ class Logger {
             entry += ` ${meta._requestPhase}`;
         if (!(isHttpRequest && cleanMessage.includes(`[${meta.method} @`)))
             entry += ` [${method}]`;
+        const _reqId = requestId ?? requestContext.getStore()?.requestId;
+        if (_reqId) entry += ` [${_reqId}]`;
         entry += ` - ${cleanMessage}`;
 
         const metaStr = this.#buildMetaString(meta);
@@ -363,7 +396,7 @@ class Logger {
     /**
      * Build the colorized console log entry string
      */
-    #formatColorizedMessage(level, message, meta = {}) {
+    #formatColorizedMessage(level, message, meta = {}, requestId = null) {
         const colors = Logger.CONFIG.COLORS;
         const { timestamp } = this.#getDateComponents();
         const cleanMessage = this.#resolveMessage(message);
@@ -388,6 +421,10 @@ class Logger {
         if (!(isHttpRequest && cleanMessage.includes(`[${meta.method} @`))) {
             entry += ` ${colors.BRACKET}[${colors.METHOD}${method}${colors.BRACKET}]${colors.RESET}`;
         }
+
+        const _reqId2 = requestId ?? requestContext.getStore()?.requestId;
+        if (_reqId2)
+            entry += ` ${colors.BRACKET}[${colors.PID}${_reqId2}${colors.BRACKET}]${colors.RESET}`;
 
         entry += ` ${colors.SEPARATOR}- ${colors.MESSAGE}${cleanMessage}${colors.RESET}`;
 
@@ -476,7 +513,7 @@ class Logger {
     /**
      * Write a formatted log entry to the appropriate file
      */
-    async #writeToFile(level, message, meta = {}) {
+    async #writeToFile(level, message, meta = {}, requestId = null) {
         const logDir = this.#getLogDirectory();
         try {
             await this.#ensureDirectoryExists(logDir);
@@ -484,10 +521,22 @@ class Logger {
                 logDir,
                 level.toLowerCase(),
             );
-            const formattedMessage = this.#formatMessage(level, message, meta);
+            const formattedMessage = this.#formatMessage(
+                level,
+                message,
+                meta,
+                requestId,
+            );
 
             if (Logger.CONFIG.CONSOLE_OUTPUT) {
-                console.log(this.#formatColorizedMessage(level, message, meta));
+                console.log(
+                    this.#formatColorizedMessage(
+                        level,
+                        message,
+                        meta,
+                        requestId,
+                    ),
+                );
             }
 
             await fs.appendFile(fullPath, formattedMessage + "\n", "utf8");
@@ -504,9 +553,9 @@ class Logger {
 
         this.isWriting = true;
         while (this.writeQueue.length > 0) {
-            const { level, message, meta } = this.writeQueue.shift();
+            const { level, message, meta, requestId } = this.writeQueue.shift();
             try {
-                await this.#writeToFile(level, message, meta);
+                await this.#writeToFile(level, message, meta, requestId);
             } catch (error) {
                 console.error("Error processing write queue:", error.message);
             }
@@ -563,7 +612,13 @@ class Logger {
     // ========================================
 
     /**
-     * Core log method — enqueues a log entry for async file writing
+     * Core log method — enqueues a log entry for async file writing.
+     * A log at RFC 5424 level N is written if N <= this.currentLevel
+     * (lower number = higher priority = always shown).
+     *
+     * @param {string} level - One of EMERGENCY, ALERT, critical, ERROR, WARNING, NOTICE, INFO, DEBUG
+     * @param {string|*} message - Log message or value
+     * @param {object} [meta={}] - Optional metadata object
      */
     async log(level, message, meta = {}) {
         if (Logger.CONFIG.LEVELS[level] > this.currentLevel) return;
@@ -571,25 +626,121 @@ class Logger {
             return;
 
         this.#injectCallSite(meta);
-        this.writeQueue.push({ level, message, meta });
+        // Capture now — the ALS context is correct here. By the time #processWriteQueue
+        // dequeues this item it may be running under a different request's context.
+        const requestId = requestContext.getStore()?.requestId ?? null;
+        this.writeQueue.push({ level, message, meta, requestId });
         this.#processWriteQueue();
     }
 
+    // ========================================
+    // PUBLIC LEVEL METHODS — RFC 5424
+    // ========================================
+
+    /**
+     * EMERGENCY (priority 0) — System is unusable. Should never occur in a running process.
+     * Use for unrecoverable panics only.
+     * @param {...*} args
+     */
+    emergency(...args) {
+        const { message, meta } = this.#normalizeLogArguments(args);
+        return this.log("EMERGENCY", message, meta);
+    }
+
+    /**
+     * EMERG — Deprecated short alias for emergency(). Retained for backward compatibility.
+     * @deprecated Use logger.emergency() instead.
+     * @param {...*} args
+     */
+    emerg(...args) {
+        return this.emergency(...args);
+    }
+
+    /**
+     * ALERT (priority 1) — Action must be taken immediately.
+     * Examples: DB pool completely down, critical dependency unreachable.
+     * @param {...*} args
+     */
+    alert(...args) {
+        const { message, meta } = this.#normalizeLogArguments(args);
+        return this.log("ALERT", message, meta);
+    }
+
+    /**
+     * critical (priority 2) — critical conditions.
+     * Examples: health check hard failure, certificate expiry.
+     * @param {...*} args
+     */
+    critical(...args) {
+        const { message, meta } = this.#normalizeLogArguments(args);
+        return this.log("critical", message, meta);
+    }
+
+    /**
+     * CRIT — Deprecated short alias for critical(). Retained for backward compatibility.
+     * @deprecated Use logger.critical() instead.
+     * @param {...*} args
+     */
+    crit(...args) {
+        return this.critical(...args);
+    }
+
+    /**
+     * ERROR (priority 3) — Error conditions.
+     * Backward-compatible replacement for old error() at level 0.
+     * @param {...*} args
+     */
     error(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
         return this.log("ERROR", message, meta);
     }
 
-    warn(...args) {
+    /**
+     * WARNING (priority 4) — Warning conditions.
+     * Canonical RFC 5424 method name. Replaces the old warn() call site name.
+     * Backward-compatible replacement for old warn() at level 1.
+     * @param {...*} args
+     */
+    warning(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
-        return this.log("WARN", message, meta);
+        return this.log("WARNING", message, meta);
     }
 
+    /**
+     * WARN — Deprecated alias for warning(). Retained for backward compatibility only.
+     * All new call sites must use logger.warning(). This alias will be removed in v6.
+     * @deprecated Use logger.warning() instead.
+     * @param {...*} args
+     */
+    warn(...args) {
+        return this.warning(...args);
+    }
+
+    /**
+     * NOTICE (priority 5) — Normal but significant condition.
+     * Examples: startup complete, config change, expected administrative events.
+     * @param {...*} args
+     */
+    notice(...args) {
+        const { message, meta } = this.#normalizeLogArguments(args);
+        return this.log("NOTICE", message, meta);
+    }
+
+    /**
+     * INFO (priority 6) — Informational messages.
+     * Backward-compatible replacement for old info() at level 2.
+     * @param {...*} args
+     */
     info(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
         return this.log("INFO", message, meta);
     }
 
+    /**
+     * DEBUG (priority 7) — Debug-level messages.
+     * Backward-compatible replacement for old debug() at level 3.
+     * @param {...*} args
+     */
     debug(...args) {
         const { message, meta } = this.#normalizeLogArguments(args);
         return this.log("DEBUG", message, meta);
@@ -637,6 +788,7 @@ class Logger {
             (req.query?.username && req.query?.userId
                 ? `${req.query.username}@${req.query.userId}`
                 : null) ||
+            (req.user?.userId ?? req.user?.sub) ||
             "anonymous@unknown";
         return `${username} (C) ${this.#getClientIp(req)}`;
     }
@@ -682,7 +834,7 @@ class Logger {
     }
 
     performance(operation, duration, details = {}) {
-        const level = duration > 5000 ? "WARN" : "INFO";
+        const level = duration > 5000 ? "WARNING" : "INFO";
         return this.log(level, "Performance", {
             operation,
             duration: `${duration}ms`,
@@ -691,7 +843,7 @@ class Logger {
     }
 
     security(event, details = {}) {
-        return this.log("WARN", "Security Event", {
+        return this.log("WARNING", "Security Event", {
             event,
             timestamp: new Date().toISOString(),
             ...details,

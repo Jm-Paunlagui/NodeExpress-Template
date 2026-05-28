@@ -51,15 +51,15 @@
  *      );
  */
 
-const { CacheStore }      = require("./CacheStore");
+const { CacheStore } = require("./CacheStore");
 const { CacheRegistry, registry } = require("./CacheRegistry");
 const { CacheKeyBuilder } = require("./CacheKeyBuilder");
 const { CacheMiddleware } = require("./CacheMiddleware");
 
 module.exports = {
-    CacheStore,
-    CacheRegistry,
-    registry,
-    CacheKeyBuilder,
-    CacheMiddleware,
+  CacheStore,
+  CacheRegistry,
+  registry,
+  CacheKeyBuilder,
+  CacheMiddleware,
 };

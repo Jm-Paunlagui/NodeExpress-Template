@@ -9,7 +9,7 @@
  *
  *   exports.getUser = catchAsync(async (req, res) => {
  *       const user = await userService.getById(req.params.id);
- *       res.json(sendSuccess('User fetched', user));
+ *       res.json(sendSuccess('USER fetched', user));
  *   });
  *
  * @param {Function} fn - Async (req, res, next) => Promise

@@ -329,7 +329,7 @@ const ORA_MAP = {
         msg: "Internal database engine error. Please contact your database administrator immediately.",
         // ORA-00600: internal error code, arguments: [string], [string], ...
         // Source: red-gate.com (#2 most searched), blogs.oracle.com/database/ora-00600 (confirmed)
-        // Critical: always logged to alert.log and trace file. Must be reported to Oracle Support.
+        // CRITICAL: always logged to alert.log and trace file. Must be reported to Oracle Support.
     },
 
     3113: {
@@ -413,7 +413,7 @@ const ORA_MAP = {
 
     1045: {
         status: 403,
-        msg: "User does not have the CREATE SESSION privilege. Database logon denied.",
+        msg: "USER does not have the CREATE SESSION privilege. Database logon denied.",
         // ORA-01045: user string lacks CREATE SESSION privilege; logon denied
         // Source: techonthenet.com/oracle/errors/ora01045.php (confirmed)
     },

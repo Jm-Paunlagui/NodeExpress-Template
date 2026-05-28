@@ -6,16 +6,16 @@ const router = express.Router();
 const AuthController = require("../controllers/auth.controllers");
 const AuthMiddleware = require("../middleware/authentication/AuthMiddleware");
 const {
-    authRateLimiter,
+  authRateLimiter,
 } = require("../middleware/security/RateLimiterMiddleware");
 
 // ── Public endpoints (no auth required) ──────────────────────────────────────
 
 router.post(
-    "/login",
-    authRateLimiter.handle,
-    AuthMiddleware.validateRequiredFields(["userId", "password"]),
-    AuthController.login,
+  "/login",
+  authRateLimiter.handle,
+  AuthMiddleware.validateRequiredFields(["userId", "password"]),
+  AuthController.login,
 );
 
 router.post("/refresh", authRateLimiter.handle, AuthController.refresh);
@@ -25,5 +25,16 @@ router.post("/refresh", authRateLimiter.handle, AuthController.refresh);
 router.post("/logout", AuthMiddleware.authenticate, AuthController.logout);
 
 router.get("/me", AuthMiddleware.authenticate, AuthController.me);
+
+// Change password (authenticated — user knows their current password).
+// Uses authRateLimiter to throttle brute-force attempts against the
+// current-password verification step.
+router.patch(
+  "/change-password",
+  authRateLimiter.handle,
+  AuthMiddleware.authenticate,
+  AuthMiddleware.validateRequiredFields(["currentPassword", "newPassword"]),
+  AuthController.changePassword,
+);
 
 module.exports = router;

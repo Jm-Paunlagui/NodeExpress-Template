@@ -251,7 +251,7 @@ Old `auth.js` had hardcoded `AREAS` and `ROLES` constants. Every project had dif
 
 ### New Design: Dynamic Permission Model
 
-Permissions are **data-driven**, not hardcoded. JWT payload carries `permissions` array (or `userLevel` number). `requireAccess` factory accepts **predicate function** receiving decoded user, returns `true/false`.
+Permissions are **data-driven**, not hardcoded. JWT payload carries `role` string (e.g. `"USER"`, `"ADMIN"`, `"SUPER_ADMIN"`, `"VIEWER"`, `"APPROVER"`, `"ROBOT"`) and optional `permissions` array. `requireAccess` factory accepts **predicate function** receiving decoded user, returns `true/false`.
 
 ```js
 // ✅ CORRECT — Dynamic access control
@@ -281,7 +281,7 @@ class AuthMiddleware {
 router.get(
   "/report",
   AuthMiddleware.authenticate,
-  AuthMiddleware.requireAccess((user) => user.userLevel >= 2),
+  AuthMiddleware.requireAccess((user) => ["ADMIN", "SUPER_ADMIN"].includes(user.role)),
   ReportController.get,
 );
 
@@ -301,7 +301,7 @@ router.delete(
   "/admin",
   AuthMiddleware.authenticate,
   AuthMiddleware.requireAccess(
-    (user) => user.userLevel >= 3 && user.permissions?.includes("DELETE_USERS"),
+    (user) => user.role === "SUPER_ADMIN" && user.permissions?.includes("DELETE_USERS"),
   ),
   AdminController.deleteUser,
 );
@@ -312,7 +312,7 @@ router.delete(
 - No `AREAS` or `ROLES` constants in template — belong to consuming application
 - Template ships **mechanism**, not hard-coded permission set
 - Each route documents own access requirement inline — no mystery
-- Backwards-compatible: `user.userLevel >= N` still works for simple projects
+- Role strings are uppercase: `"ROBOT"`, `"USER"`, `"ADMIN"`, `"SUPER_ADMIN"`, `"VIEWER"`, `"APPROVER"` — must match `T_EMP_MGMT_ADMIN.EMP_ROLE` exactly
 
 ---
 
@@ -1133,7 +1133,7 @@ const jwt = require("jsonwebtoken");
 
 function signToken(payload = {}, expiresIn = "1h") {
   return jwt.sign(
-    { sub: "test-user", userLevel: 1, ...payload },
+    { sub: "test-user", role: "USER", ...payload },
     process.env.JWT_SECRET || "test-secret",
     { expiresIn },
   );
@@ -1291,10 +1291,10 @@ describe("Auth Security", function () {
 
     it("returns 403 for a token with a tampered payload", async function () {
       // Sign a valid token, then corrupt the payload segment
-      const valid = signToken({ userLevel: 1 });
+      const valid = signToken({ role: "USER" });
       const parts = valid.split(".");
       parts[1] = Buffer.from(
-        JSON.stringify({ sub: "hacker", userLevel: 99 }),
+        JSON.stringify({ sub: "hacker", role: "SUPER_ADMIN" }),
       ).toString("base64url");
       const tampered = parts.join(".");
       const res = await agent
@@ -1305,9 +1305,9 @@ describe("Auth Security", function () {
   });
 
   describe("authorization (permission level)", function () {
-    it("returns 403 when user level is below route requirement", async function () {
-      // Route requires userLevel >= 2; token has userLevel 1
-      const token = signToken({ userLevel: 1 });
+    it("returns 403 when role is insufficient for the route", async function () {
+      // Route requires ADMIN or SUPER_ADMIN; token carries USER role
+      const token = signToken({ role: "USER" });
       const res = await agent
         .get("/api/v1/admin/dashboard")
         .set("Authorization", `Bearer ${token}`);

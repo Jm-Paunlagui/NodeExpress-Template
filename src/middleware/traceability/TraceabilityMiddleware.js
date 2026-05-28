@@ -8,112 +8,127 @@
 
 const { logger } = require("../../utils/logger");
 const { nanoid } = require("../../utils/nanoidLoader");
+const { requestContext } = require("../../utils/requestContext");
 
 const SENSITIVE_PATTERNS = [
-    "password", "passwd", "pwd", "token", "secret",
-    "apikey", "auth", "otp", "pin", "cvv", "cvc",
-    "ssn", "privatekey", "creditcard", "cardnumber",
+  "password",
+  "passwd",
+  "pwd",
+  "token",
+  "secret",
+  "apikey",
+  "auth",
+  "otp",
+  "pin",
+  "cvv",
+  "cvc",
+  "ssn",
+  "privatekey",
+  "creditcard",
+  "cardnumber",
 ];
 
 function isSensitiveKey(key) {
-    const norm = key.toLowerCase().replace(/[-_\s]/g, "");
-    return SENSITIVE_PATTERNS.some((p) => norm.includes(p));
+  const norm = key.toLowerCase().replace(/[-_\s]/g, "");
+  return SENSITIVE_PATTERNS.some((p) => norm.includes(p));
 }
 
 function redactValue(key, value) {
-    return isSensitiveKey(key) ? "[REDACTED]" : value;
+  return isSensitiveKey(key) ? "[REDACTED]" : value;
 }
 
 class TraceabilityMiddleware {
-    constructor(options = {}) {
-        this._excludedUrls = options.excludedUrls ?? [
-            ...(process.env.LOG_EXCLUDE_HEALTH === "true" ? ["/health"] : []),
-            ...(process.env.LOG_EXCLUDE_URLS
-                ? process.env.LOG_EXCLUDE_URLS.split(",")
-                : []),
-        ];
+  constructor(options = {}) {
+    this._excludedUrls = options.excludedUrls ?? [
+      ...(process.env.LOG_EXCLUDE_HEALTH === "true" ? ["/health"] : []),
+      ...(process.env.LOG_EXCLUDE_URLS
+        ? process.env.LOG_EXCLUDE_URLS.split(",")
+        : []),
+    ];
 
-        this.handle = this.handle.bind(this);
-    }
+    this.handle = this.handle.bind(this);
+  }
 
-    handle(req, res, next) {
-        // Inject unique request ID
-        req.id = `req_${nanoid(10)}`;
-        res.setHeader("X-Request-ID", req.id);
+  handle(req, res, next) {
+    // Inject unique request ID
+    req.id = `req_${nanoid(10)}`;
+    res.setHeader("X-Request-ID", req.id);
 
-        const startTime = Date.now();
-        const url = req.originalUrl || req.url;
-        const isOptions = req.method === "OPTIONS";
-        const shouldLog = !this._excludedUrls.some((u) =>
-            url.includes(u.trim()),
+    const startTime = Date.now();
+    const url = req.originalUrl || req.url;
+    const isOptions = req.method === "OPTIONS";
+    const shouldLog = !this._excludedUrls.some((u) => url.includes(u.trim()));
+
+    // Run the entire request inside an AsyncLocalStorage context so every
+    // downstream logger.info() call automatically includes [req_id].
+    requestContext.run({ requestId: req.id }, () => {
+      if (shouldLog && !isOptions) {
+        logger.logIncomingRequest(
+          req,
+          TraceabilityMiddleware.createRequestMessage(req),
         );
+      }
 
+      const originalEnd = res.end;
+      res.end = function (...args) {
+        const duration = Date.now() - startTime;
         if (shouldLog && !isOptions) {
-            logger.logIncomingRequest(
-                req,
-                TraceabilityMiddleware.createRequestMessage(req),
-            );
+          logger.logCompletedRequest(
+            req,
+            res,
+            duration,
+            TraceabilityMiddleware.createRequestMessage(req),
+          );
         }
+        originalEnd.apply(this, args);
+      };
 
-        const originalEnd = res.end;
-        res.end = function (...args) {
-            const duration = Date.now() - startTime;
-            if (shouldLog && !isOptions) {
-                logger.logCompletedRequest(
-                    req,
-                    res,
-                    duration,
-                    TraceabilityMiddleware.createRequestMessage(req),
-                );
-            }
-            originalEnd.apply(this, args);
-        };
+      next();
+    });
+  }
 
-        next();
+  static createRequestMessage(req) {
+    const url = req.originalUrl || req.url;
+    let message = `[${req.method} @ ${url}]`;
+
+    if (Object.keys(req.query).length > 0) {
+      const params = Object.entries(req.query)
+        .map(([k, v]) => `${k}=${redactValue(k, v)}`)
+        .join("&");
+      message += ` [PARAMS @ ${params}]`;
     }
 
-    static createRequestMessage(req) {
-        const url = req.originalUrl || req.url;
-        let message = `[${req.method} @ ${url}]`;
-
-        if (Object.keys(req.query).length > 0) {
-            const params = Object.entries(req.query)
-                .map(([k, v]) => `${k}=${redactValue(k, v)}`)
-                .join("&");
-            message += ` [PARAMS @ ${params}]`;
-        }
-
-        if (["POST", "PUT", "PATCH"].includes(req.method)) {
-            let bodyContent = "";
-            if (!req.body) {
-                bodyContent = "req.body is undefined";
-            } else if (typeof req.body !== "object") {
-                bodyContent = `req.body is ${typeof req.body}`;
-            } else if (Object.keys(req.body).length === 0) {
-                bodyContent = "req.body is empty object";
-            } else {
-                bodyContent = Object.entries(req.body)
-                    .map(([key, value]) => {
-                        if (isSensitiveKey(key)) return `${key}=[REDACTED]`;
-                        if (value === null) return `${key}=null`;
-                        if (value === undefined) return `${key}=undefined`;
-                        if (typeof value === "object") {
-                            try {
-                                const json = JSON.stringify(value);
-                                return `${key}=${json.length > 500 ? json.substring(0, 497) + "..." : json}`;
-                            } catch {
-                                return `${key}=[Complex Object]`;
-                            }
-                        }
-                        return `${key}=${value}`;
-                    })
-                    .join(", ");
+    if (["POST", "PUT", "PATCH"].includes(req.method)) {
+      let bodyContent = "";
+      if (!req.body) {
+        bodyContent = "req.body is undefined";
+      } else if (typeof req.body !== "object") {
+        bodyContent = `req.body is ${typeof req.body}`;
+      } else if (Object.keys(req.body).length === 0) {
+        bodyContent = "req.body is empty object";
+      } else {
+        bodyContent = Object.entries(req.body)
+          .map(([key, value]) => {
+            if (isSensitiveKey(key)) return `${key}=[REDACTED]`;
+            if (value === null) return `${key}=null`;
+            if (value === undefined) return `${key}=undefined`;
+            if (typeof value === "object") {
+              try {
+                const json = JSON.stringify(value);
+                return `${key}=${json.length > 500 ? json.substring(0, 497) + "..." : json}`;
+              } catch {
+                return `${key}=[Complex Object]`;
+              }
             }
-            message += ` [BODY @ ${bodyContent}]`;
-        }
-
-        return message;
+            return `${key}=${value}`;
+          })
+          .join(", ");
+      }
+      message += ` [BODY @ ${bodyContent}]`;
     }
+
+    return message;
+  }
 }
 
 const defaultTraceability = new TraceabilityMiddleware();

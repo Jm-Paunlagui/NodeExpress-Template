@@ -174,7 +174,11 @@ if (ENABLE_CLUSTERING && cluster.isMaster) {
     process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
     process.on("unhandledRejection", (reason) => {
-        logger.error("Unhandled rejection", { error: reason });
+        // Error objects serialize to {} with JSON.stringify — extract fields explicitly.
+        const meta = reason instanceof Error
+            ? { error: reason.message, stack: reason.stack, type: reason.constructor.name }
+            : { error: String(reason), type: typeof reason };
+        logger.error("Unhandled rejection", meta);
         gracefulShutdown("unhandledRejection");
     });
 
@@ -182,6 +186,7 @@ if (ENABLE_CLUSTERING && cluster.isMaster) {
         logger.error("Uncaught exception", {
             error: err.message,
             stack: err.stack,
+            type: err.constructor.name,
         });
         gracefulShutdown("uncaughtException");
     });

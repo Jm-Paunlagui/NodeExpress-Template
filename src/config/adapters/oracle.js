@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Oracle Adapter
  * Merges: oracleEnvironment.js + oracleLoader.js + oracleConnectionPool.js
  *
@@ -34,11 +34,11 @@ const { oracleMessages } = require("../../constants/messages");
 function validateOracleClient() {
     const clientPath = process.env.ORACLE_INSTANT_CLIENT;
     if (!clientPath) {
-        logger.warn(oracleMessages.ORACLE_INSTANT_CLIENT_NOT_SET);
+        logger.warning(oracleMessages.ORACLE_INSTANT_CLIENT_NOT_SET);
         return false;
     }
     if (!fs.existsSync(clientPath)) {
-        logger.error(oracleMessages.ORACLE_CLIENT_PATH_NOT_FOUND(clientPath));
+        logger.warning(oracleMessages.ORACLE_CLIENT_PATH_NOT_FOUND(clientPath));
         return false;
     }
 
@@ -47,11 +47,13 @@ function validateOracleClient() {
         (f) => !fs.existsSync(path.join(clientPath, f)),
     );
     if (missing.length) {
-        logger.warn(oracleMessages.ORACLE_FILES_MISSING(missing, clientPath));
+        logger.warning(
+            oracleMessages.ORACLE_FILES_MISSING(missing, clientPath),
+        );
         return false;
     }
 
-    logger.info(oracleMessages.ORACLE_CLIENT_VALIDATED(clientPath));
+    logger.notice(oracleMessages.ORACLE_CLIENT_VALIDATED(clientPath));
     return true;
 }
 
@@ -61,7 +63,7 @@ function setupOracleEnvironment() {
     const current = process.env.PATH || "";
     if (!current.includes(clientPath)) {
         process.env.PATH = `${clientPath};${current}`;
-        logger.info(`Oracle client prepended to PATH: ${clientPath}`);
+        logger.notice(`Oracle client prepended to PATH: ${clientPath}`);
     }
 }
 
@@ -95,13 +97,15 @@ function _loadEnvForCompiled() {
                 const value = trimmed.slice(eqIdx + 1).trim();
                 if (!process.env[key]) process.env[key] = value;
             }
-            logger.info(`Env loaded from: ${filePath}`);
+            logger.notice(`Env loaded from: ${filePath}`);
             return;
         } catch (err) {
-            logger.warn(`Could not read .env at ${filePath}: ${err.message}`);
+            logger.warning(
+                `Could not read .env at ${filePath}: ${err.message}`,
+            );
         }
     }
-    logger.warn("No .env found in compiled environment.");
+    logger.warning("No .env found in compiled environment.");
 }
 
 function _initOracleClient(db) {
@@ -111,23 +115,23 @@ function _initOracleClient(db) {
     try {
         if (isValid && clientPath) {
             db.initOracleClient({ libDir: clientPath });
-            logger.info(
+            logger.notice(
                 "Oracle client initialised from ORACLE_INSTANT_CLIENT.",
             );
         } else {
             db.initOracleClient();
-            logger.info("Oracle client initialised from system PATH.");
+            logger.notice("Oracle client initialised from system PATH.");
         }
     } catch (err) {
         if (!err.message.includes("NJS-077"))
-            logger.warn(`Oracle client init: ${err.message}`);
+            logger.warning(`Oracle client init: ${err.message}`);
     }
 }
 
 let oracledb;
 try {
     if (isCompiled) {
-        logger.info(
+        logger.notice(
             "Compiled exe detected — bootstrapping Oracle environment.",
         );
         _loadEnvForCompiled();
@@ -141,9 +145,9 @@ try {
     _initOracleClient(oracledb);
 
     const mode = oracledb.oracleClientVersion ? "Thick" : "Thin";
-    logger.info(`oracledb driver loaded (${mode} mode).`);
+    logger.notice(`oracledb driver loaded (${mode} mode).`);
 } catch (err) {
-    logger.error(`Failed to load oracledb: ${err.message}`);
+    logger.critical(`Failed to load oracledb: ${err.message}`);
     throw err;
 }
 
@@ -212,7 +216,7 @@ class PoolHealthMonitor {
                 !meta.healthy &&
                 meta.consecutiveFailures >= this._maxFailures
             ) {
-                logger.info(
+                logger.notice(
                     oracleMessages.POOL_RECOVERED(
                         name,
                         meta.consecutiveFailures,
@@ -225,7 +229,7 @@ class PoolHealthMonitor {
         } catch {
             meta.consecutiveFailures++;
             meta.lastCheck = new Date();
-            logger.warn(
+            logger.warning(
                 oracleMessages.POOL_HEALTH_CHECK_FAILED(
                     name,
                     meta.consecutiveFailures,
@@ -233,7 +237,7 @@ class PoolHealthMonitor {
             );
             if (meta.consecutiveFailures >= this._maxFailures) {
                 if (meta.healthy) {
-                    logger.error(
+                    logger.critical(
                         oracleMessages.POOL_MARKED_UNHEALTHY(
                             name,
                             this._maxFailures,
@@ -250,7 +254,7 @@ class PoolHealthMonitor {
         this._timer = setInterval(() => {
             for (const name of poolRegistry.keys())
                 this.checkPool(name).catch((e) =>
-                    logger.error(`Health check "${name}": ${e.message}`),
+                    logger.warning(`Health check "${name}": ${e.message}`),
                 );
         }, this._checkIntervalMs);
         if (this._timer.unref) this._timer.unref();
@@ -287,7 +291,7 @@ function _validateConfig(config, name) {
     const isPlaceholder =
         config.user && String(config.user).includes("placeholder");
     if (process.env.NODE_ENV === "development" && isPlaceholder) {
-        logger.warn(
+        logger.warning(
             `Dev mode: placeholder config for "${name}". Missing: ${missing.join(", ")}`,
         );
         return;
@@ -329,7 +333,7 @@ async function _createPool(name, dbConfig, attempt = 0) {
         await conn.ping();
         await conn.close();
 
-        logger.info(oracleMessages.POOL_READY(name, pool));
+        logger.notice(oracleMessages.POOL_READY(name, pool));
         return pool;
     } catch (err) {
         // Destroy the partially-created pool so the alias is freed for retries
@@ -341,16 +345,16 @@ async function _createPool(name, dbConfig, attempt = 0) {
             }
         }
 
-        logger.error(
-            oracleMessages.POOL_FAILED(
-                name,
-                attempt + 1,
-                MAX_RETRIES + 1,
-                err.message,
-            ),
-        );
         if (attempt < MAX_RETRIES) {
-            logger.info(oracleMessages.POOL_RETRYING(name, delay));
+            logger.warning(
+                oracleMessages.POOL_FAILED(
+                    name,
+                    attempt + 1,
+                    MAX_RETRIES + 1,
+                    err.message,
+                ),
+            );
+            logger.warning(oracleMessages.POOL_RETRYING(name, delay));
             await _sleep(delay);
             return _createPool(name, dbConfig, attempt + 1);
         }
@@ -385,7 +389,7 @@ function _getOrCreatePool(name) {
  */
 async function initializePools() {
     const names = getConnectionNames();
-    logger.info(
+    logger.notice(
         `Initializing ${names.length} database pool(s): ${names.join(", ")}`,
     );
 
@@ -398,10 +402,10 @@ async function initializePools() {
             const safeCfg = { ...POOL_DEFAULTS, ...config };
             delete safeCfg.password;
             delete safeCfg.user;
-            logger.info(`Creating ${name} pool with configuration:`, safeCfg);
+            logger.notice(`Creating ${name} pool with configuration:`, safeCfg);
 
             const pool = await _getOrCreatePool(name);
-            logger.info(
+            logger.notice(
                 `${name} pool created successfully with ${pool.poolMin}-${pool.poolMax} connections`,
             );
             results.push({ name, success: true });
@@ -418,7 +422,7 @@ async function initializePools() {
                   ? "Pool alias collision during retry. The previous pool was not fully cleaned up."
                   : "Check DB credentials, network connectivity, and Oracle client installation.";
 
-            logger.error(`Failed to initialize pool "${name}"`, {
+            logger.critical(`Failed to initialize pool "${name}"`, {
                 error: err.message,
                 type: err.constructor.name,
                 stack: err.stack,
@@ -432,11 +436,11 @@ async function initializePools() {
 
     const failed = results.filter((r) => !r.success);
     if (failed.length) {
-        logger.warn(
+        logger.warning(
             `${failed.length}/${names.length} pool(s) failed to initialize: ${failed.map((f) => f.name).join(", ")}. They will retry on first use.`,
         );
     } else {
-        logger.info(`All ${names.length} pool(s) initialized successfully.`);
+        logger.notice(`All ${names.length} pool(s) initialized successfully.`);
     }
     return results;
 }
@@ -453,7 +457,7 @@ async function withConnection(connectionName, callback) {
         throw new TypeError("withConnection: callback must be a function.");
 
     if (!healthMonitor.isHealthy(connectionName))
-        logger.warn(
+        logger.warning(
             `Pool "${connectionName}" is unhealthy — attempting anyway.`,
         );
 
@@ -473,10 +477,10 @@ async function withConnection(connectionName, callback) {
         const result = await callback(conn);
         const elapsed = Date.now() - start;
         if (elapsed > 5_000)
-            logger.warn(oracleMessages.SLOW_OP(connectionName, elapsed));
+            logger.warning(oracleMessages.SLOW_OP(connectionName, elapsed));
         return result;
     } catch (err) {
-        logger.error(
+        logger.critical(
             oracleMessages.OP_FAILED(
                 connectionName,
                 Date.now() - start,
@@ -496,7 +500,7 @@ async function withConnection(connectionName, callback) {
             try {
                 await conn.close();
             } catch (e) {
-                logger.error(
+                logger.warning(
                     oracleMessages.CLOSE_FAILED(connectionName, e.message),
                 );
             }
@@ -519,7 +523,7 @@ async function withTransaction(connectionName, callback) {
             try {
                 await conn.rollback();
             } catch (e) {
-                logger.error(
+                logger.warning(
                     oracleMessages.ROLLBACK_FAILED(connectionName, e.message),
                 );
             }
@@ -559,7 +563,7 @@ async function withBatchConnection(connectionName, operations) {
                     index: i,
                 });
             } catch (err) {
-                logger.error(oracleMessages.BATCH_OP_FAILED(i, err.message));
+                logger.warning(oracleMessages.BATCH_OP_FAILED(i, err.message));
                 results.push({ success: false, error: err.message, index: i });
                 if (err.code && FATAL.has(err.code)) throw err;
             }
@@ -613,12 +617,12 @@ async function getPoolStats() {
 
 async function closeAll() {
     if (isShuttingDown) {
-        logger.warn(oracleMessages.SHUTDOWN_ALREADY);
+        logger.warning(oracleMessages.SHUTDOWN_ALREADY);
         return;
     }
     isShuttingDown = true;
     healthMonitor.stop();
-    logger.info(oracleMessages.CLOSING_ALL_POOLS);
+    logger.notice(oracleMessages.CLOSING_ALL_POOLS);
     const closures = [];
     for (const [name, poolPromise] of poolRegistry) {
         closures.push(
@@ -626,9 +630,9 @@ async function closeAll() {
                 poolPromise.then((p) => p.close(10)),
                 _timeout(30_000, `Shutdown timeout for "${name}"`),
             ])
-                .then(() => logger.info(oracleMessages.POOL_CLOSED(name)))
+                .then(() => logger.notice(oracleMessages.POOL_CLOSED(name)))
                 .catch((e) =>
-                    logger.error(
+                    logger.warning(
                         oracleMessages.POOL_CLOSE_ERROR(name, e.message),
                     ),
                 ),
@@ -636,7 +640,7 @@ async function closeAll() {
     }
     await Promise.allSettled(closures);
     poolRegistry.clear();
-    logger.info(oracleMessages.ALL_POOLS_CLOSED);
+    logger.notice(oracleMessages.ALL_POOLS_CLOSED);
 }
 
 // Signal / exception handlers are in server.js — not duplicated here.

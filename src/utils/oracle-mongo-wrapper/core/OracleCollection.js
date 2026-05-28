@@ -85,6 +85,24 @@ const {
     oracleMongoWrapperMessages: MSG,
 } = require("../../../constants/messages");
 
+/**
+ * Deep-clone an object/array while preserving Date instances.
+ * JSON.parse(JSON.stringify(...)) converts Dates to ISO strings, which then
+ * fail Oracle's NLS_DATE_FORMAT implicit conversion (ORA-01843) when passed
+ * as bind values against DATE columns.
+ *
+ * @param {*} value
+ * @returns {*}
+ */
+function _deepClone(value) {
+    if (value === null || typeof value !== "object") return value;
+    if (value instanceof Date) return new Date(value.getTime());
+    if (Array.isArray(value)) return value.map(_deepClone);
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = _deepClone(value[k]);
+    return out;
+}
+
 class OracleCollection {
     /**
      * Create an OracleCollection instance for a specific table.
@@ -509,7 +527,7 @@ class OracleCollection {
      * Runs SELECT COUNT(*) — scans the actual data. For a faster
      * approximate count, use estimatedDocumentCount() instead.
      *
-     * @param {Object} [filter] - Filter criteria (omit or {} for all rows)
+     * @param {Object} [filter] - Filter criticaleria (omit or {} for all rows)
      * @returns {Promise<number>} The count of matching rows
      *
      * @example
@@ -1282,7 +1300,10 @@ class OracleCollection {
      */
     aggregate(pipeline) {
         const { buildAggregateSQL } = require("../pipeline/aggregatePipeline");
-        const pipelineCopy = JSON.parse(JSON.stringify(pipeline));
+        // Deep-clone preserving Date instances — JSON round-trip converts Dates to
+        // ISO strings which then fail Oracle's NLS_DATE_FORMAT implicit conversion
+        // (ORA-01843) when used as bind values against DATE columns.
+        const pipelineCopy = _deepClone(pipeline);
         const { sql, binds } = buildAggregateSQL(
             this.tableName,
             pipelineCopy,

@@ -1,4 +1,4 @@
-const { logger } = require("./logger");
+﻿const { logger } = require("./logger");
 
 class ConsoleManager {
     constructor() {
@@ -26,7 +26,7 @@ class ConsoleManager {
         this.setupShutdownHandlers();
 
         this.isInitialized = true;
-        logger.info("Console Manager initialized successfully");
+        logger.notice("Console Manager initialized successfully");
     }
 
     /**
@@ -39,14 +39,14 @@ class ConsoleManager {
 
             // Verify the title was set
             if (process.title === title) {
-                logger.info(`Process title set to: ${title}`);
+                logger.notice(`Process title set to: ${title}`);
             } else {
-                logger.warn(
+                logger.warning(
                     `Failed to set process title. Current: ${process.title}`,
                 );
             }
         } catch (error) {
-            logger.error("Error setting process title:", {
+            logger.warning("Error setting process title:", {
                 error: error.message,
             });
         }
@@ -58,26 +58,26 @@ class ConsoleManager {
     displayAsciiArt() {
         const border = "=".repeat(172);
         const asciiArt = `
-        ooo        ooooo oooooooooooo       .o.       ooooo             oooooooooo.                      oooo                                    .o8  
-        \`88.       .888' \`888'     \`8      .888.      \`888'             \`888'   \`Y8b                     \`888                                   "888  
-         888b     d'888   888             .8"888.      888               888     888  .oooo.    .ooooo.   888  oooo   .ooooo.  ooo. .oo.    .oooo888  
-         8 Y88. .P  888   888oooo8       .8' \`888.     888               888oooo888' \`P  )88b  d88' \`"Y8  888 .8P'   d88' \`88b \`888P"Y88b  d88' \`888  
-         8  \`888'   888   888    "      .88ooo8888.    888               888    \`88b  .oP"888  888        888888.    888ooo888  888   888  888   888  
-         8    Y     888   888       o  .8'     \`888.   888       o       888    .88P d8(  888  888   .o8  888 \`88b.  888    .o  888   888  888   888  
-        o8o        o888o o888ooooood8 o88o     o8888o o888ooooood8      o888bood8P'  \`Y888""8o \`Y8bod8P' o888o o888o \`Y8bod8P' o888o o888o \`Y8bod88P" 
-`;
+            .oooooo.         .o.       ooooooooooooo ooooo   ooooo oooooooooooo ooooooooo.   ooooo ooooo      ooo oooooooooooo      oooooooooo.  oooooooooooo 
+           d8P'  \`Y8b       .888.      8'   888   \`8 \`888'   \`888' \`888'     \`8 \`888   \`Y88. \`888' \`888b.     \`8' \`888'     \`8      \`888'   \`Y8b \`888'     \`8 
+          888              .8"888.          888       888     888   888          888   .d88'  888   8 \`88b.    8   888               888     888  888         
+          888             .8' \`888.         888       888ooooo888   888oooo8     888ooo88P'   888   8   \`88b.  8   888oooo8          888oooo888'  888oooo8    
+          888            .88ooo8888.        888       888     888   888    "     888\`88b.     888   8     \`88b.8   888    "          888    \`88b  888    "    
+          \`88b    ooo   .8'     \`888.       888       888     888   888       o  888  \`88b.   888   8       \`888   888       o       888    .88P  888       o 
+           \`Y8bood8P'  o88o     o8888o     o888o     o888o   o888o o888ooooood8 o888o  o888o o888o o8o        \`8  o888ooooood8      o888bood8P'  o888ooooood8                                                                                                                                                                                                                                                  
+        `;
 
         console.log("\n" + border);
         console.log(asciiArt);
         console.log(border);
         console.log(
-            `                                                                           MEAL Backend Server`,
+            `                                                                        CATHERINE Backend Server`,
         );
         console.log(
-            `                                                                  Meal Expense and Allowance Ledger System`,
+            `                                        Class-based Architecture, Tailwind, Hardened Express, React Integrated Node Ecosystem`,
         );
         console.log(
-            `                                                                        Author: John Moises Paunlagui`,
+            `                                                                      Author: John Moises Paunlagui`,
         );
         console.log(border + "\n");
     }
@@ -97,7 +97,7 @@ class ConsoleManager {
             60 * 60 * 1000,
         ); // Check every hour
 
-        logger.info("Daily console clearing scheduled");
+        logger.notice("Daily console clearing scheduled");
     }
 
     /**
@@ -137,7 +137,7 @@ class ConsoleManager {
             // Alternative method for better compatibility
             console.clear();
         } catch (error) {
-            logger.error("Error clearing console:", { error: error.message });
+            logger.warning("Error clearing console:", { error: error.message });
         }
     }
 

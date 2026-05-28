@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 const express = require("express");
 const app = express();
@@ -7,35 +7,41 @@ const app = express();
 const { defaultHelmet } = require("./middleware/security/HelmetMiddleware");
 const { defaultCors } = require("./middleware/security/CorsMiddleware");
 const {
-    defaultSecurityFilter,
+  defaultSecurityFilter,
 } = require("./middleware/security/SecurityFilterMiddleware");
 const { defaultIpFilter } = require("./middleware/security/IpFilterMiddleware");
 const {
-    defaultPreventRedirects,
+  defaultPreventRedirects,
 } = require("./middleware/security/PreventRedirectsMiddleware");
 const {
-    defaultRateLimiter,
+  defaultRateLimiter,
 } = require("./middleware/security/RateLimiterMiddleware");
 
 // ─── Traceability middleware ──────────────────────────────────────────────────
 const {
-    defaultTraceability,
+  defaultTraceability,
 } = require("./middleware/traceability/TraceabilityMiddleware");
+const {
+  defaultAuditLog,
+} = require("./middleware/traceability/AuditLogMiddleware");
 
 // ─── Performance middleware ───────────────────────────────────────────────────
 const {
-    defaultCompression,
+  defaultCompression,
 } = require("./middleware/performance/CompressionMiddleware");
 const {
-    defaultResponseTime,
+  defaultResponseTime,
 } = require("./middleware/performance/ResponseTimeMiddleware");
+
+// ─── Metrics middleware ───────────────────────────────────────────────────────
+const { defaultMetrics } = require("./middleware/metrics");
 
 // ─── Parsing middleware ───────────────────────────────────────────────────────
 const {
-    defaultBodyParser,
+  defaultBodyParser,
 } = require("./middleware/parsing/BodyParserMiddleware");
 const {
-    defaultCookieParser,
+  defaultCookieParser,
 } = require("./middleware/parsing/CookieParserMiddleware");
 
 // ─── CSRF protection ──────────────────────────────────────────────────────────
@@ -43,8 +49,23 @@ const { defaultCsrf } = require("./middleware/security/CsrfMiddleware");
 
 // ─── Error handling ───────────────────────────────────────────────────────────
 const {
-    defaultErrorHandler,
+  defaultErrorHandler,
 } = require("./middleware/errorHandling/ErrorHandlerMiddleware");
+
+// ─── Cache stores ─────────────────────────────────────────────────────────────
+const { registry } = require("./middleware/cache");
+registry.registerAll({
+  // ── Admin roster ──────────────────────────────────────────────────────────────
+  // Small dataset (<100 admins). Queried by admin list and billing recipient
+  // selector. Mutates only on admin CRUD. maxKeys=50 is a hard ceiling.
+  adminList: { ttl: 600, checkPeriod: 120, maxKeys: 50 },
+
+  // ── Audit log ─────────────────────────────────────────────────────────────────
+  // Logs grow continuously; 120s TTL prevents serving stale security telemetry
+  // while reducing Oracle pressure for admin polling. maxKeys=200 covers
+  // concurrent admin sessions browsing the list, stats, and per-requestId views.
+  auditLog: { ttl: 120, checkPeriod: 30, maxKeys: 200 },
+});
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 const routes = require("./routes");
@@ -62,12 +83,21 @@ app.use(defaultSecurityFilter.handle.bind(defaultSecurityFilter));
 // 3. Request ID + request/response logging
 app.use(defaultTraceability.handle.bind(defaultTraceability)); // lgtm[js/missing-rate-limiting] Rate limiting is enforced by RateLimiterMiddleware (step 12)
 
+// 3a. Audit log DB persistence — fires after res.end via setImmediate
+app.use(defaultAuditLog.handle.bind(defaultAuditLog));
+
 // 4. Body parsing — must be before route handlers so req.body is available
 app.use(defaultBodyParser.jsonHandler);
 app.use(defaultBodyParser.urlencodedHandler);
 
 // 5. Response-time tracking (X-Response-Time header + per-route metrics)
 app.use(defaultResponseTime.handle.bind(defaultResponseTime));
+
+// 5a. Metrics collection — must run after ResponseTimeMiddleware so both
+//     measure from the same request-start origin. MetricsMiddleware maintains
+//     its own per-route ring buffers for p50/p95/p99 percentile calculation,
+//     which ResponseTimeMiddleware does not provide.
+app.use(defaultMetrics.handle.bind(defaultMetrics));
 
 // 6. Compression
 app.use(defaultCompression.handle.bind(defaultCompression));
@@ -84,8 +114,8 @@ app.use(defaultCookieParser.handle.bind(defaultCookieParser)); // lgtm[js/missin
 //    doubleCsrf only enforces on state-changing methods (POST/PUT/DELETE/PATCH);
 //    GET /csrf/token and other safe methods pass through automatically.
 app.use((req, res, next) => {
-    if (req.path.startsWith("/api/v1/csrf")) return next();
-    defaultCsrf.handle.bind(defaultCsrf)(req, res, next);
+  if (req.path.startsWith("/api/v1/csrf")) return next();
+  defaultCsrf.handle.bind(defaultCsrf)(req, res, next);
 });
 
 // 10. Capture response body for downstream logging

@@ -426,16 +426,17 @@ const validatePassword = (value, label = "Password") => {
     }
 };
 
-// ─── Logger fallback (uses your project logger if available, else console) ───
+// ─── Logger — uses project logger; silently drops events if unavailable ──────
+// Fallback is intentionally a no-op (not console.*) because CryptoVault handles
+// security-critical operations (Argon2, TripleDES, HMAC-SHA256 signing). Using
+// console.* in the fallback would emit sensitive operational events outside the
+// structured log pipeline, making them invisible in production environments.
 let _logger;
 try {
     _logger = require("../logger").logger;
 } catch {
-    _logger = {
-        error: (...args) => console.error("[CryptoVault]", ...args),
-        warn: (...args) => console.warn("[CryptoVault]", ...args),
-        info: (...args) => console.info("[CryptoVault]", ...args),
-    };
+    const noop = () => {};
+    _logger = { error: noop, warn: noop, info: noop };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -690,11 +691,7 @@ class CryptoVault {
                 "[CryptoVault] buildPayload: context must be a non-empty string.",
             );
         }
-        if (
-            !fields ||
-            typeof fields !== "object" ||
-            Array.isArray(fields)
-        ) {
+        if (!fields || typeof fields !== "object" || Array.isArray(fields)) {
             throw new TypeError(
                 "[CryptoVault] buildPayload: fields must be a plain object.",
             );
@@ -828,15 +825,15 @@ class CryptoVault {
     static verifyRowHash(canonicalInput, storedHash) {
         if (!canonicalInput || !storedHash) return false;
         const computed = crypto
-            .createHash('sha256')
-            .update(canonicalInput, 'utf8')
-            .digest('hex')
+            .createHash("sha256")
+            .update(canonicalInput, "utf8")
+            .digest("hex")
             .toUpperCase();
         const stored = storedHash.toUpperCase();
         if (computed.length !== stored.length) return false;
         return crypto.timingSafeEqual(
-            Buffer.from(computed, 'utf8'),
-            Buffer.from(stored, 'utf8'),
+            Buffer.from(computed, "utf8"),
+            Buffer.from(stored, "utf8"),
         );
     }
 }
@@ -1272,7 +1269,10 @@ if (require.main === module) {
             const rawSig = await CryptoVault.signData(rawPayload);
             if (typeof rawSig === "string" && rawSig.length === 64)
                 pass("signData returns 64-char hex string");
-            else fail("signData output", { message: `Got length ${rawSig?.length}` });
+            else
+                fail("signData output", {
+                    message: `Got length ${rawSig?.length}`,
+                });
 
             if (await CryptoVault.verifySignature(rawPayload, rawSig))
                 pass("verifySignature: correct payload matches");
@@ -1282,7 +1282,9 @@ if (require.main === module) {
                 pass("verifySignature: tampered payload rejected");
             else fail("verifySignature tamper", { message: "Should be false" });
 
-            if (!(await CryptoVault.verifySignature(rawPayload, "a".repeat(64))))
+            if (
+                !(await CryptoVault.verifySignature(rawPayload, "a".repeat(64)))
+            )
                 pass("verifySignature: forged signature rejected");
             else fail("verifySignature forged", { message: "Should be false" });
 
@@ -1292,41 +1294,87 @@ if (require.main === module) {
             else fail("signData determinism", { message: "Signatures differ" });
 
             // ── buildPayload ──
-            const p1 = CryptoVault.buildPayload("USERS", { ROLE: "admin", ID: 1, PW: "hash" });
-            const p2 = CryptoVault.buildPayload("USERS", { ID: 1, PW: "hash", ROLE: "admin" });
+            const p1 = CryptoVault.buildPayload("USERS", {
+                ROLE: "admin",
+                ID: 1,
+                PW: "hash",
+            });
+            const p2 = CryptoVault.buildPayload("USERS", {
+                ID: 1,
+                PW: "hash",
+                ROLE: "admin",
+            });
             if (p1 === p2)
-                pass("buildPayload: key insertion order does not affect output");
+                pass(
+                    "buildPayload: key insertion order does not affect output",
+                );
             else fail("buildPayload order", { message: `p1=${p1} p2=${p2}` });
 
             if (p1.startsWith("USERS:"))
                 pass("buildPayload: context prefix present");
             else fail("buildPayload prefix", { message: p1 });
 
-            const pOther = CryptoVault.buildPayload("ORDERS", { ID: 1, PW: "hash", ROLE: "admin" });
+            const pOther = CryptoVault.buildPayload("ORDERS", {
+                ID: 1,
+                PW: "hash",
+                ROLE: "admin",
+            });
             if (p1 !== pOther)
                 pass("buildPayload: different context → different payload");
-            else fail("buildPayload context isolation", { message: "Should differ" });
+            else
+                fail("buildPayload context isolation", {
+                    message: "Should differ",
+                });
 
             // ── signRecord / verifyRecord round-trip ──
-            const fields = { EMP_ID: "EMP001", EMP_PW: "$argon2id$v=19$m=19456$...", EMP_ROLE: "SuperAdmin" };
-            const recSig = await CryptoVault.signRecord("T_EMP_MGMT_ADMIN", fields);
-            if (await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", fields, recSig))
+            const fields = {
+                EMP_ID: "EMP001",
+                EMP_PW: "$argon2id$v=19$m=19456$...",
+                EMP_ROLE: "SuperAdmin",
+            };
+            const recSig = await CryptoVault.signRecord(
+                "T_EMP_MGMT_ADMIN",
+                fields,
+            );
+            if (
+                await CryptoVault.verifyRecord(
+                    "T_EMP_MGMT_ADMIN",
+                    fields,
+                    recSig,
+                )
+            )
                 pass("signRecord / verifyRecord round-trip");
             else fail("signRecord round-trip", { message: "Should be true" });
 
             // wrong field value
-            const badFields = { ...fields, EMP_ROLE: "User" };
-            if (!(await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", badFields, recSig)))
+            const badFields = { ...fields, EMP_ROLE: "USER" };
+            if (
+                !(await CryptoVault.verifyRecord(
+                    "T_EMP_MGMT_ADMIN",
+                    badFields,
+                    recSig,
+                ))
+            )
                 pass("verifyRecord: mutated field value rejected");
             else fail("verifyRecord mutation", { message: "Should be false" });
 
             // wrong context — same fields, different entity
-            if (!(await CryptoVault.verifyRecord("OTHER_TABLE", fields, recSig)))
-                pass("verifyRecord: wrong context rejected (cross-entity replay blocked)");
+            if (
+                !(await CryptoVault.verifyRecord("OTHER_TABLE", fields, recSig))
+            )
+                pass(
+                    "verifyRecord: wrong context rejected (cross-entity replay blocked)",
+                );
             else fail("verifyRecord context", { message: "Should be false" });
 
             // null / missing signature handled gracefully
-            if (!(await CryptoVault.verifyRecord("T_EMP_MGMT_ADMIN", fields, null)))
+            if (
+                !(await CryptoVault.verifyRecord(
+                    "T_EMP_MGMT_ADMIN",
+                    fields,
+                    null,
+                ))
+            )
                 pass("verifyRecord: null signature returns false");
             else fail("verifyRecord null sig", { message: "Should be false" });
 
@@ -1345,6 +1393,24 @@ if (require.main === module) {
             }
         } catch (err) {
             fail("HMAC-SHA256 signing tests", err);
+        }
+
+        // ── TEST GROUP 9: Specific Decryption Task ──
+        console.log("\n▸ Manual Decryption Task");
+        hr();
+        try {
+            const targetCipher = "0k9DQnY8Zp0=";
+
+            // Decrypt using the helper (ensure process.env.PASSWORD_KEY is "HRIS" or your specific key)
+            const result =
+                SymmetricCrypto.SecurityCryptHelper.decryptText(targetCipher);
+
+            console.log(`    Ciphertext : ${targetCipher}`);
+            console.log(`    Plain Text : ${result}`);
+
+            if (result) pass("Decryption successful");
+        } catch (err) {
+            fail("Decryption task", err);
         }
 
         console.log(

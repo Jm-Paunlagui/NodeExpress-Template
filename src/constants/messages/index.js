@@ -6,9 +6,12 @@
  */
 
 module.exports = {
-    ...require("./oracle.messages"),
-    ...require("./oracleWrapper.messages"),
-    ...require("./auth.messages"),
-    ...require("./middleware.messages"),
-    ...require("./database.messages"),
+  ...require("./oracle.messages"),
+  ...require("./oracleWrapper.messages"),
+  ...require("./auth.messages"),
+  ...require("./middleware.messages"),
+  ...require("./database.messages"),
+  ...require("./auditLog.messages"),
+  ...require("./metrics.messages"),
+  ...require("./client.messages"),
 };
