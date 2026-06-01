@@ -7,10 +7,25 @@
  * All validation lives here; controllers stay thin.
  */
 
-const { AppError, CHANGELOG_ERRORS, VALIDATION_ERRORS } = require("../constants/errors");
+const {
+    AppError,
+    CHANGELOG_ERRORS,
+    VALIDATION_ERRORS,
+} = require("../constants/errors");
 const ChangelogModel = require("../models/changelog.model");
 
-const VALID_TYPES = ["feat", "fix", "perf", "refactor", "security", "docs", "chore"];
+const VALID_TYPES = [
+    "feat",
+    "fix",
+    "perf",
+    "refactor",
+    "security",
+    "docs",
+    "chore",
+];
+
+// SemVer: MAJOR.MINOR.PATCH — must be numeric segments only.
+const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
 // ISO date string YYYY-MM-DD
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -24,13 +39,16 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * @returns {object} Normalised fields
  */
 function validate(data, requireAll = true) {
-    const { displayDate, version, title, summary, type, authors, coAuthors } = data;
+    const { displayDate, version, title, summary, type, authors, coAuthors } =
+        data;
 
     if (requireAll) {
         if (!displayDate || !version || !title || !summary || !type) {
             throw new AppError(VALIDATION_ERRORS.MISSING_FIELDS, 400, {
                 type: "ValidationError",
-                details: ["displayDate, version, title, summary, and type are required."],
+                details: [
+                    "displayDate, version, title, summary, and type are required.",
+                ],
             });
         }
     }
@@ -49,23 +67,38 @@ function validate(data, requireAll = true) {
         });
     }
 
+    if (version !== undefined && !SEMVER_RE.test(String(version).trim())) {
+        throw new AppError(CHANGELOG_ERRORS.INVALID_ENTRY, 400, {
+            type: "ValidationError",
+            details: [
+                "version must follow Semantic Versioning format: MAJOR.MINOR.PATCH (e.g. 1.4.0).",
+            ],
+        });
+    }
+
     const normalised = {};
     if (displayDate !== undefined) normalised.displayDate = displayDate;
-    if (version     !== undefined) normalised.version     = String(version).trim();
-    if (title       !== undefined) normalised.title       = String(title).trim();
-    if (summary     !== undefined) normalised.summary     = String(summary).trim();
-    if (type        !== undefined) normalised.type        = type;
+    if (version !== undefined) normalised.version = String(version).trim();
+    if (title !== undefined) normalised.title = String(title).trim();
+    if (summary !== undefined) normalised.summary = String(summary).trim();
+    if (type !== undefined) normalised.type = type;
 
     // authors / coAuthors: accept array or comma-separated string
     if (authors !== undefined) {
         normalised.authors = Array.isArray(authors)
             ? authors.map((a) => String(a).trim()).filter(Boolean)
-            : String(authors).split(",").map((a) => a.trim()).filter(Boolean);
+            : String(authors)
+                  .split(",")
+                  .map((a) => a.trim())
+                  .filter(Boolean);
     }
     if (coAuthors !== undefined) {
         normalised.coAuthors = Array.isArray(coAuthors)
             ? coAuthors.map((a) => String(a).trim()).filter(Boolean)
-            : String(coAuthors).split(",").map((a) => a.trim()).filter(Boolean);
+            : String(coAuthors)
+                  .split(",")
+                  .map((a) => a.trim())
+                  .filter(Boolean);
     }
 
     return normalised;

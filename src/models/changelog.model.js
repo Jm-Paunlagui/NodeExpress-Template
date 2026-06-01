@@ -88,7 +88,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0001-0000-0000-000000000001",
         displayDate: "2026-05-28",
-        version: "1.14.0",
+        version: "1.13.0",
         title: "Version History Page",
         summary:
             "Added this Version History page so you can always see what changed in the system and when. The history is stored in an AES-256 encrypted file on the server so no one can alter the release record without the encryption key. Super Administrators can add, edit, and delete entries directly from this page.",
@@ -101,7 +101,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0002-0000-0000-000000000002",
         displayDate: "2026-05-28",
-        version: "1.13.1",
+        version: "1.12.1",
         title: "47 Security Audit Fixes",
         summary:
             "Resolved 47 security issues flagged by an automated audit. Key fixes: your personal details (name, email) are no longer stored in the browser between sessions — only a session expiry timestamp is kept. File download filenames are now sanitized to prevent HTTP header manipulation. Login rate limiting was tightened from 10 to 5 attempts per window. Missing tokens now return 401, tampered tokens return 403, and expired tokens return 440. The server no longer leaks internal error details in production. The request cache is now capped at 200 entries to prevent unbounded memory growth.",
@@ -114,7 +114,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0003-0000-0000-000000000003",
         displayDate: "2026-05-28",
-        version: "1.13.0",
+        version: "1.12.0",
         title: "Role Model Overhaul & UI Refresh",
         summary:
             "Updated the permission system across the entire application: instead of numeric codes (1, 2, 3…), users now have a readable role label — ROBOT, USER, ADMIN, SUPER_ADMIN, VIEWER, or APPROVER. This makes access control rules much easier to read and maintain. The Select, Pagination, and Table components received major improvements. Added the xlsx library for Excel export features and date-fns for reliable date formatting.",
@@ -127,7 +127,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0004-0000-0000-000000000004",
         displayDate: "2026-05-20",
-        version: "1.12.0",
+        version: "1.11.0",
         title: "User Profile Card & Centralized Navigation",
         summary:
             "Added a user profile card in the sidebar navigation showing your avatar (with a unique colour generated from your name), Employee ID, email address, division, and role. Navigation links are now managed from a single central configuration file that separates public links (visible before login) from authenticated role-based navigation groups — making it straightforward to add or rearrange navigation items.",
@@ -140,7 +140,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0005-0000-0000-000000000005",
         displayDate: "2026-05-07",
-        version: "1.11.1",
+        version: "1.10.1",
         title: "Timezone Offset & Documentation Update",
         summary:
             "Added a configurable timezone offset setting for the database integrity service. This ensures that tamper-detection checksums are calculated correctly for servers running in different time zones, preventing false-positive integrity failures. Updated and clarified internal project documentation.",
@@ -153,7 +153,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0006-0000-0000-000000000006",
         displayDate: "2026-04-28",
-        version: "1.11.0",
+        version: "1.10.0",
         title: "Case-Insensitive Search & Improved Modal",
         summary:
             "Search and filter functions now support case-insensitive matching, so you can type in any mix of upper and lower case when searching. The popup dialog (Modal) component was upgraded to use portal rendering — modals now appear above all other content — and a blur effect was added to the backdrop for a more polished look.",
@@ -166,7 +166,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0007-0000-0000-000000000007",
         displayDate: "2026-04-25",
-        version: "1.10.1",
+        version: "1.9.0",
         title: "Database Record Integrity Check",
         summary:
             "Added a SHA-256 checksum verification method compatible with Oracle's native hashing. This lets the system confirm that any row fetched from the database matches the hash recorded when it was last saved, automatically detecting silent data corruption or unauthorised modifications.",
@@ -179,7 +179,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0008-0000-0000-000000000008",
         displayDate: "2026-04-24",
-        version: "1.10.0",
+        version: "1.8.0",
         title: "Login Lockout & Coming Soon Pages",
         summary:
             "Login now enforces a lockout policy: after a configurable number of failed sign-in attempts, the account is temporarily locked to prevent brute-force attacks. Error messages across all server routes now include clearer titles to help administrators diagnose problems faster. Added placeholder Coming Soon screens for sections of the application still under development.",
@@ -192,7 +192,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-0009-0000-0000-000000000009",
         displayDate: "2026-04-23",
-        version: "1.9.0",
+        version: "1.7.4",
         title: "Dark Mode Consistency Across All Components",
         summary:
             "Updated all remaining UI components — Checkbox, File Input, Phone Input, Radio, Range slider, Navbar, Sidebar, Tooltip, Timeline, Modal, Progress bar, Speed Dial, and others — to use a consistent dark mode colour scheme. The HTTP client and authentication middleware were also refined for better token handling and request traceability.",
@@ -205,7 +205,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-000a-0000-0000-00000000000a",
         displayDate: "2026-04-22",
-        version: "1.8.1",
+        version: "1.7.3",
         title: "HMAC-SHA256 Signing & Navigation Refactor",
         summary:
             "Upgraded the data signing mechanism to use HMAC-SHA256 with a secret key, making it significantly harder for an attacker to forge a valid signature even if they can read the stored data. Refactored the sidebar and navigation bar to share a common hook and central configuration file, reducing code duplication and making it easier to add new navigation items.",
@@ -218,7 +218,7 @@ const SEED_ENTRIES = [
     {
         id: "1a2b3c4d-000b-0000-0000-00000000000b",
         displayDate: "2026-04-21",
-        version: "1.8.0",
+        version: "1.7.2",
         title: "Tamper-Evident Storage & Error Classification",
         summary:
             "Added data signing and verification so the system can detect if any record was secretly modified outside of normal operations. Any record whose signature does not match is flagged on the next read. Improved the error handling middleware with a detailed classification system that categorises errors by severity (authentication failure, validation error, database error, etc.) and logs them with structured detail.",
