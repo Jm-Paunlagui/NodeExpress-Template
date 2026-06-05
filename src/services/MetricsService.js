@@ -11,6 +11,19 @@ const { AppError, METRICS_ERRORS } = require("../constants/errors");
 const { logger } = require("../utils/logger");
 const { metricsMessages } = require("../constants/messages");
 
+/**
+ * @constant {number} Server-error rate (5xx-only) that raises a WARNING alert.
+ * Tuned for the server-only error rate: 4xx are excluded from the SLI, so a
+ * sustained 1% of serviced requests failing with 5xx is already abnormal.
+ */
+const ERROR_RATE_WARNING_THRESHOLD = 0.01;
+
+/**
+ * @constant {number} Server-error rate (5xx-only) that raises a CRITICAL alert.
+ * Sustained 5% of serviced requests returning 5xx is an active outage.
+ */
+const ERROR_RATE_CRITICAL_THRESHOLD = 0.05;
+
 class MetricsService {
     // ========================================
     // SNAPSHOT & ALERTS
@@ -70,10 +83,14 @@ class MetricsService {
      * Returns an array of triggered alert objects (empty array = all clear).
      *
      * Alert rules:
-     *   1. Error rate > 5% across all routes
+     *   1. Server-error rate (5xx-only) > 1% warning / > 5% critical, across all routes
      *   2. P99 latency > 2000ms on any individual route
      *   3. Heap usage > 80% of heapTotal
      *   4. Event-loop lag > 100ms
+     *
+     * Note: the global error rate is computed from 5xx responses only — client
+     * errors (4xx) are excluded so auth failures, validation rejections, and
+     * scanner noise never trip the availability alert. See MetricsStore.computeRates.
      *
      * @param {object} [snapshot] - Optional pre-fetched snapshot; fetches fresh if omitted
      * @returns {Array<{ rule: string, severity: string, value: number, route?: string }>}
@@ -82,18 +99,25 @@ class MetricsService {
         const snap = snapshot || MetricsService.getSnapshot();
         const alerts = [];
 
-        // Rule 1 — high global error rate
-        if (snap.totals.errorRate > 0.05) {
+        // Rule 1 — high global SERVER-error rate (5xx-only; 4xx excluded)
+        const errorRate = snap.totals.errorRate;
+        if (errorRate > ERROR_RATE_WARNING_THRESHOLD) {
+            const isCritical = errorRate > ERROR_RATE_CRITICAL_THRESHOLD;
+            const severity = isCritical ? "critical" : "warning";
+            const threshold = isCritical
+                ? ERROR_RATE_CRITICAL_THRESHOLD
+                : ERROR_RATE_WARNING_THRESHOLD;
             alerts.push({
                 rule: "HIGH_ERROR_RATE",
-                severity: "warning",
-                value: snap.totals.errorRate,
-                description: `Global error rate is ${(snap.totals.errorRate * 100).toFixed(2)}% (threshold: 5%)`,
+                severity,
+                value: errorRate,
+                description: `Global server-error rate is ${(errorRate * 100).toFixed(2)}% (threshold: ${(threshold * 100).toFixed(0)}%, 5xx only)`,
             });
-            logger.warning(
-                metricsMessages.ALERT_TRIGGERED("HIGH_ERROR_RATE", "warning"),
+            logger[isCritical ? "crit" : "warning"](
+                metricsMessages.ALERT_TRIGGERED("HIGH_ERROR_RATE", severity),
                 {
-                    errorRate: snap.totals.errorRate,
+                    errorRate,
+                    serverErrorsTotal: snap.totals.serverErrorsTotal,
                 },
             );
         }

@@ -34,6 +34,19 @@ const FRONTEND_VITALS_MAX = 500;
 /** @constant {number} System metrics polling interval in milliseconds */
 const SYSTEM_POLL_INTERVAL_MS = 10_000;
 
+/**
+ * @constant {number} Lowest HTTP status treated as a CLIENT error (4xx).
+ * Client errors mean the service correctly rejected bad input — they are
+ * EXCLUDED from the availability and (server) error-rate computations.
+ */
+const CLIENT_ERROR_MIN_STATUS = 400;
+
+/**
+ * @constant {number} Lowest HTTP status treated as a SERVER error (5xx).
+ * Server errors are the only failures that count against availability.
+ */
+const SERVER_ERROR_MIN_STATUS = 500;
+
 // ─── Percentile helper ────────────────────────────────────────────────────────
 
 /**
@@ -48,6 +61,37 @@ function calcPercentile(sorted, pct) {
   return sorted[Math.min(idx, sorted.length - 1)];
 }
 
+// ─── RED rate helper ──────────────────────────────────────────────────────────
+
+/**
+ * Derive availability and error rates from raw request buckets.
+ *
+ * Definitions (request-based SLI, Google SRE convention):
+ *   serviced       = total − clientErrors   (4xx excluded from the denominator)
+ *   availability   = (serviced − serverErrors) / serviced   → 1 - errorRate
+ *   errorRate      = serverErrors / serviced                (server-only)
+ *   clientErrorRate= clientErrors / total                   (visibility lane)
+ *
+ * Client errors (4xx) are deliberately excluded from availability and errorRate:
+ * a 400/401/403/404/422 means the service did its job by rejecting bad input.
+ * They are still reported via clientErrorRate so 4xx storms (auth failures,
+ * broken validation, scanner noise) stay visible without polluting the SLI.
+ *
+ * @param {number} total        - Total requests observed
+ * @param {number} clientErrors - Count of 4xx responses
+ * @param {number} serverErrors - Count of 5xx responses
+ * @returns {{ availability: number, errorRate: number, clientErrorRate: number }}
+ */
+function computeRates(total, clientErrors, serverErrors) {
+  const serviced = total - clientErrors; // 2xx/3xx + 5xx
+  return {
+    // No serviced requests → nothing failed → fully available by definition.
+    availability: serviced > 0 ? (serviced - serverErrors) / serviced : 1,
+    errorRate: serviced > 0 ? serverErrors / serviced : 0,
+    clientErrorRate: total > 0 ? clientErrors / total : 0,
+  };
+}
+
 // ─── MetricsStore class ───────────────────────────────────────────────────────
 
 class MetricsStore {
@@ -55,16 +99,19 @@ class MetricsStore {
     /**
      * Per-route RED data.
      * Key: "<METHOD> <path>" e.g. "GET /api/v1/health"
-     * Value: { count, errorCount, durations: CircularBuffer }
-     * @type {Map<string, { count: number, errorCount: number, durations: number[] }>}
+     * Value: { count, clientErrorCount, serverErrorCount, durations: CircularBuffer }
+     * @type {Map<string, { count: number, clientErrorCount: number, serverErrorCount: number, durations: number[] }>}
      */
     this._routes = new Map();
 
     /** Total request counter (all routes combined) */
     this._requestsTotal = 0;
 
-    /** Total error counter (status >= 400) */
-    this._errorsTotal = 0;
+    /** Total CLIENT error counter (4xx) — excluded from availability/errorRate */
+    this._clientErrorsTotal = 0;
+
+    /** Total SERVER error counter (5xx) — the only failures that count against availability */
+    this._serverErrorsTotal = 0;
 
     /**
      * Oracle pool stats.
@@ -231,17 +278,25 @@ class MetricsStore {
    */
   recordRequest(route, method, statusCode, durationMs) {
     this._requestsTotal++;
-    const isError = statusCode >= 400;
-    if (isError) this._errorsTotal++;
+
+    // 4xx → client error (correct rejection); 5xx → server error (real failure).
+    const isServerError = statusCode >= SERVER_ERROR_MIN_STATUS;
+    const isClientError =
+      statusCode >= CLIENT_ERROR_MIN_STATUS &&
+      statusCode < SERVER_ERROR_MIN_STATUS;
+
+    if (isServerError) this._serverErrorsTotal++;
+    if (isClientError) this._clientErrorsTotal++;
 
     let entry = this._routes.get(route);
     if (!entry) {
-      entry = { count: 0, errorCount: 0, durations: [] };
+      entry = { count: 0, clientErrorCount: 0, serverErrorCount: 0, durations: [] };
       this._routes.set(route, entry);
     }
 
     entry.count++;
-    if (isError) entry.errorCount++;
+    if (isServerError) entry.serverErrorCount++;
+    if (isClientError) entry.clientErrorCount++;
     this.#pushRing(entry.durations, durationMs);
   }
 
@@ -308,10 +363,10 @@ class MetricsStore {
    * @returns {{
    *   timestamp: string,
    *   uptime: number,
-   *   red: Object.<string, { count: number, errorCount: number, errorRate: number, p50: number, p95: number, p99: number, avgMs: number }>,
+   *   red: Object.<string, { count: number, clientErrorCount: number, serverErrorCount: number, errorRate: number, clientErrorRate: number, availability: number, p50: number, p95: number, p99: number, avgMs: number }>,
    *   system: { cpu: object, memory: object, eventLoopLag: number, gc: object, handles: number, requests: number },
    *   dependencies: { oracle: Object.<string, { queryCount: number, errorCount: number, avgMs: number, p95Ms: number }> },
-   *   totals: { requestsTotal: number, errorsTotal: number, errorRate: number },
+   *   totals: { requestsTotal: number, clientErrorsTotal: number, serverErrorsTotal: number, errorRate: number, clientErrorRate: number, availability: number },
    *   frontendVitals: Array,
    *   frontendErrors: Array
    * }}
@@ -325,10 +380,19 @@ class MetricsStore {
         ? Math.round(sorted.reduce((s, v) => s + v, 0) / sorted.length)
         : 0;
 
+      const rates = computeRates(
+        entry.count,
+        entry.clientErrorCount,
+        entry.serverErrorCount,
+      );
+
       red[route] = {
         count: entry.count,
-        errorCount: entry.errorCount,
-        errorRate: entry.count ? entry.errorCount / entry.count : 0,
+        clientErrorCount: entry.clientErrorCount,
+        serverErrorCount: entry.serverErrorCount,
+        errorRate: rates.errorRate, // server-only (4xx excluded)
+        clientErrorRate: rates.clientErrorRate,
+        availability: rates.availability,
         p50: calcPercentile(sorted, 0.5),
         p95: calcPercentile(sorted, 0.95),
         p99: calcPercentile(sorted, 0.99),
@@ -366,13 +430,21 @@ class MetricsStore {
       dependencies: {
         oracle: oracleDeps,
       },
-      totals: {
-        requestsTotal: this._requestsTotal,
-        errorsTotal: this._errorsTotal,
-        errorRate: this._requestsTotal
-          ? this._errorsTotal / this._requestsTotal
-          : 0,
-      },
+      totals: (() => {
+        const rates = computeRates(
+          this._requestsTotal,
+          this._clientErrorsTotal,
+          this._serverErrorsTotal,
+        );
+        return {
+          requestsTotal: this._requestsTotal,
+          clientErrorsTotal: this._clientErrorsTotal,
+          serverErrorsTotal: this._serverErrorsTotal,
+          errorRate: rates.errorRate, // server-only (4xx excluded)
+          clientErrorRate: rates.clientErrorRate,
+          availability: rates.availability,
+        };
+      })(),
       frontendVitals: [...this._frontendVitals],
       frontendErrors: [...this._frontendErrors],
     };
@@ -383,4 +455,10 @@ class MetricsStore {
 
 const metricsStore = new MetricsStore();
 
-module.exports = { MetricsStore, metricsStore };
+module.exports = {
+  MetricsStore,
+  metricsStore,
+  computeRates,
+  CLIENT_ERROR_MIN_STATUS,
+  SERVER_ERROR_MIN_STATUS,
+};

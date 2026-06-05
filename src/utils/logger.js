@@ -776,6 +776,11 @@ class Logger {
         return this.log(level, customMessage || "Request Complete", {
             method: req.method,
             url: req.originalUrl || req.url,
+            // statusCode + durationMs make ERROR-level completions diagnosable —
+            // without them a request in error.log shows the route but not whether
+            // it was a 401, 404, 429, or 500.
+            statusCode: res.statusCode,
+            durationMs: duration,
             _isHttpRequest: true,
             _requestPhase: "[Request Complete]",
             _clientMachine: this.#createClientMachineIdentifier(req),

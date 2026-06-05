@@ -119,12 +119,32 @@ class AuditLogService {
 
     const agg = await AuditLogModel.aggregate(matchFilter);
 
-    const successRate = agg.total > 0
-      ? parseFloat(((agg.success + agg.redirect) / agg.total * 100).toFixed(1))
+    // ── Availability SLI (health) ─────────────────────────────────────────────
+    // Client errors (4xx) are EXCLUDED from the denominator — a 4xx means the
+    // service correctly rejected bad input, not that it failed. Availability
+    // answers: "of the requests the server was responsible for, what fraction
+    // were served correctly?"
+    //   serviced     = total − clientError          (= success + redirect + serverError)
+    //   availability = (success + redirect) / serviced
+    const serviced = agg.total - agg.clientError;
+
+    const successRate = serviced > 0
+      ? parseFloat(((agg.success + agg.redirect) / serviced * 100).toFixed(1))
+      : 100.0; // no serviced requests → nothing failed → fully available
+
+    // ── Error rates (traffic breakdown) ───────────────────────────────────────
+    // Each error class as an INDEPENDENT share of TOTAL traffic, so Client and
+    // Server rates are symmetric and directly comparable. NOTE: these are a
+    // traffic breakdown, not the availability SLI — availability deliberately
+    // ignores 4xx, so availability is NOT 1 − serverErrorRate.
+    //   clientErrorRate = clientError / total
+    //   serverErrorRate = serverError / total
+    const clientErrorRate = agg.total > 0
+      ? parseFloat((agg.clientError / agg.total * 100).toFixed(1))
       : 0.0;
 
-    const errorRate = agg.total > 0
-      ? parseFloat(((agg.clientError + agg.serverError) / agg.total * 100).toFixed(1))
+    const serverErrorRate = agg.total > 0
+      ? parseFloat((agg.serverError / agg.total * 100).toFixed(1))
       : 0.0;
 
     logger.info(auditLogMessages.STATS_FETCHED(resolvedFromDate.toISOString(), resolvedToDate.toISOString()));
@@ -137,8 +157,9 @@ class AuditLogService {
       serverError:     agg.serverError,
       uniqueUsers:     agg.uniqueUsers,
       avgResponseTime: agg.avgResponseTime,
-      successRate,
-      errorRate,
+      successRate,       // Availability (SLI) — 4xx excluded from denominator
+      clientErrorRate,   // 4xx / total — independent traffic share
+      serverErrorRate,   // 5xx / total — independent traffic share
       fromDate:        resolvedFromDate.toISOString(),
       toDate:          resolvedToDate.toISOString(),
     };
