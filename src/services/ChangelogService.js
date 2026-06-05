@@ -17,6 +17,7 @@ const ChangelogModel = require("../models/changelog.model");
 const VALID_TYPES = [
     "feat",
     "fix",
+    "patch",
     "perf",
     "refactor",
     "security",
@@ -34,20 +35,28 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
  * Validates and normalises the fields for a changelog entry.
  * Throws AppError on validation failure.
  *
- * @param {object} data - Raw request body fields
+ * @param {object}  data           - Raw request body fields
  * @param {boolean} [requireAll=true] - false for partial update (PATCH-style)
  * @returns {object} Normalised fields
  */
 function validate(data, requireAll = true) {
-    const { displayDate, version, title, summary, type, authors, coAuthors } =
-        data;
+    const {
+        displayDate,
+        version,
+        title,
+        message,
+        whatChanged,
+        type,
+        authors,
+        coAuthors,
+    } = data;
 
     if (requireAll) {
-        if (!displayDate || !version || !title || !summary || !type) {
+        if (!displayDate || !version || !title || !message || !type) {
             throw new AppError(VALIDATION_ERRORS.MISSING_FIELDS, 400, {
                 type: "ValidationError",
                 details: [
-                    "displayDate, version, title, summary, and type are required.",
+                    "displayDate, version, title, message, and type are required.",
                 ],
             });
         }
@@ -76,11 +85,19 @@ function validate(data, requireAll = true) {
         });
     }
 
+    if (whatChanged !== undefined && !Array.isArray(whatChanged)) {
+        throw new AppError(CHANGELOG_ERRORS.INVALID_ENTRY, 400, {
+            type: "ValidationError",
+            details: ["whatChanged must be an array of change items."],
+        });
+    }
+
     const normalised = {};
     if (displayDate !== undefined) normalised.displayDate = displayDate;
     if (version !== undefined) normalised.version = String(version).trim();
     if (title !== undefined) normalised.title = String(title).trim();
-    if (summary !== undefined) normalised.summary = String(summary).trim();
+    if (message !== undefined) normalised.message = String(message).trim();
+    if (whatChanged !== undefined) normalised.whatChanged = whatChanged;
     if (type !== undefined) normalised.type = type;
 
     // authors / coAuthors: accept array or comma-separated string
