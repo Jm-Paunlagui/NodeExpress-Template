@@ -24,6 +24,31 @@ const ERROR_RATE_WARNING_THRESHOLD = 0.01;
  */
 const ERROR_RATE_CRITICAL_THRESHOLD = 0.05;
 
+/**
+ * @constant {number} Heap utilization (heapUsed / heap_size_limit) that raises a
+ * WARNING. Measured against the real V8 ceiling, NOT heapTotal — heapTotal is only
+ * what V8 has committed so far and naturally sits near 100% by design, so dividing
+ * by it produced permanent false "critical" heap alerts.
+ */
+const HEAP_UTILIZATION_WARNING_THRESHOLD = 0.75;
+
+/**
+ * @constant {number} Heap utilization (heapUsed / heap_size_limit) that raises a
+ * CRITICAL alert — the process is genuinely approaching OOM at this point.
+ */
+const HEAP_UTILIZATION_CRITICAL_THRESHOLD = 0.9;
+
+/**
+ * @constant {number} GC overhead (% of wall-clock time spent paused in GC over the
+ * last poll window) that raises a WARNING. A healthy process sits well under 2%;
+ * sustained > 5% means V8 is collecting far more than it should — the signature of
+ * a process running too close to its heap ceiling (GC thrashing).
+ */
+const GC_OVERHEAD_WARNING_THRESHOLD = 5;
+
+/** @constant {number} GC overhead that raises a CRITICAL alert — collection is starving the event loop. */
+const GC_OVERHEAD_CRITICAL_THRESHOLD = 10;
+
 class MetricsService {
     // ========================================
     // SNAPSHOT & ALERTS
@@ -71,6 +96,9 @@ class MetricsService {
                 heapTotalMb: Math.round(
                     snapshot.system.memory.heapTotal / 1024 / 1024,
                 ),
+                heapLimitMb: Math.round(
+                    snapshot.system.memory.heapSizeLimit / 1024 / 1024,
+                ),
                 eventLoopLag: snapshot.system.eventLoopLag,
             },
             topSlowRoutes,
@@ -85,8 +113,10 @@ class MetricsService {
      * Alert rules:
      *   1. Server-error rate (5xx-only) > 1% warning / > 5% critical, across all routes
      *   2. P99 latency > 2000ms on any individual route
-     *   3. Heap usage > 80% of heapTotal
+     *   3. Heap usage > 75% (warning) / > 90% (critical) of the V8 heap ceiling
      *   4. Event-loop lag > 100ms
+     *   5. GC overhead > 5% (warning) / > 10% (critical) of wall-clock time
+     *   6. Memory leak suspected — sustained post-major-GC live-set growth
      *
      * Note: the global error rate is computed from 5xx responses only — client
      * errors (4xx) are excluded so auth failures, validation rejections, and
@@ -142,28 +172,31 @@ class MetricsService {
             }
         }
 
-        // Rule 3 — heap pressure
-        const heapPct =
-            snap.system.memory.heapTotal > 0
-                ? snap.system.memory.heapUsed / snap.system.memory.heapTotal
-                : 0;
-        if (heapPct > 0.8) {
+        // Rule 3 — heap pressure (measured against the real V8 ceiling, not heapTotal)
+        const heapLimit = snap.system.memory.heapSizeLimit;
+        const heapUtilization =
+            heapLimit > 0 ? snap.system.memory.heapUsed / heapLimit : 0;
+        if (heapUtilization > HEAP_UTILIZATION_WARNING_THRESHOLD) {
+            const isCritical =
+                heapUtilization > HEAP_UTILIZATION_CRITICAL_THRESHOLD;
+            const severity = isCritical ? "critical" : "warning";
+            const threshold = isCritical
+                ? HEAP_UTILIZATION_CRITICAL_THRESHOLD
+                : HEAP_UTILIZATION_WARNING_THRESHOLD;
             alerts.push({
                 rule: "HIGH_HEAP",
-                severity: "critical",
-                value: heapPct,
-                description: `Heap usage is ${(heapPct * 100).toFixed(1)}% of total (threshold: 80%)`,
+                severity,
+                value: heapUtilization,
+                description: `Heap usage is ${(heapUtilization * 100).toFixed(1)}% of the V8 limit (threshold: ${(threshold * 100).toFixed(0)}%)`,
             });
-            logger.critical(
-                metricsMessages.ALERT_TRIGGERED("HIGH_HEAP", "critical"),
+            logger[isCritical ? "crit" : "warning"](
+                metricsMessages.ALERT_TRIGGERED("HIGH_HEAP", severity),
                 {
-                    heapPct,
+                    heapUtilization,
                     heapUsedMb: Math.round(
                         snap.system.memory.heapUsed / 1024 / 1024,
                     ),
-                    heapTotalMb: Math.round(
-                        snap.system.memory.heapTotal / 1024 / 1024,
-                    ),
+                    heapLimitMb: Math.round(heapLimit / 1024 / 1024),
                 },
             );
         }
@@ -180,6 +213,51 @@ class MetricsService {
                 metricsMessages.ALERT_TRIGGERED("EVENT_LOOP_LAG", "warning"),
                 {
                     lagMs: snap.system.eventLoopLag,
+                },
+            );
+        }
+
+        // Rule 5 — GC overhead (process spending too much time collecting)
+        const gcOverhead = snap.system.gc?.overheadPct ?? 0;
+        if (gcOverhead > GC_OVERHEAD_WARNING_THRESHOLD) {
+            const isCritical = gcOverhead > GC_OVERHEAD_CRITICAL_THRESHOLD;
+            const severity = isCritical ? "critical" : "warning";
+            const threshold = isCritical
+                ? GC_OVERHEAD_CRITICAL_THRESHOLD
+                : GC_OVERHEAD_WARNING_THRESHOLD;
+            alerts.push({
+                rule: "HIGH_GC_OVERHEAD",
+                severity,
+                value: gcOverhead,
+                description: `GC overhead is ${gcOverhead}% of wall-clock time (threshold: ${threshold}%)`,
+            });
+            logger[isCritical ? "crit" : "warning"](
+                metricsMessages.ALERT_TRIGGERED("HIGH_GC_OVERHEAD", severity),
+                {
+                    overheadPct: gcOverhead,
+                    majorCollections: snap.system.gc?.major?.count,
+                },
+            );
+        }
+
+        // Rule 6 — suspected memory leak (sustained post-major-GC live-set growth)
+        const trend = snap.system.memoryTrend;
+        if (trend?.suspected) {
+            const mbPerMin = (trend.growthBytesPerMin / (1024 * 1024)).toFixed(2);
+            const windowMin = Math.round(trend.windowMs / 60_000);
+            alerts.push({
+                rule: "MEMORY_LEAK_SUSPECTED",
+                severity: "warning",
+                value: trend.growthBytesPerMin,
+                description: `Post-GC heap is climbing ~${mbPerMin} MB/min over ${windowMin} min across ${trend.sampleCount} major-GC baselines — investigate for a leak`,
+            });
+            logger.warning(
+                metricsMessages.ALERT_TRIGGERED("MEMORY_LEAK_SUSPECTED", "warning"),
+                {
+                    growthBytesPerMin: trend.growthBytesPerMin,
+                    windowMs: trend.windowMs,
+                    firstHeapUsedMb: Math.round(trend.firstHeapUsed / 1024 / 1024),
+                    lastHeapUsedMb: Math.round(trend.lastHeapUsed / 1024 / 1024),
                 },
             );
         }

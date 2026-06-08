@@ -24,6 +24,16 @@
  */
 
 const { PerformanceObserver, performance } = require("perf_hooks");
+const v8 = require("node:v8");
+
+/**
+ * @constant {number} The hard V8 old-space ceiling for this process, in bytes.
+ * This is the real limit heapUsed is measured against — NOT heapTotal, which is
+ * only the amount V8 has committed so far and grows on demand up to this value.
+ * Constant for the process lifetime (governed by --max-old-space-size), so it is
+ * read once at module load rather than on every poll.
+ */
+const HEAP_SIZE_LIMIT = v8.getHeapStatistics().heap_size_limit;
 
 /** @constant {number} Maximum number of duration samples per route for percentile calc */
 const RING_BUFFER_SIZE = 1000;
@@ -33,6 +43,30 @@ const FRONTEND_VITALS_MAX = 500;
 
 /** @constant {number} System metrics polling interval in milliseconds */
 const SYSTEM_POLL_INTERVAL_MS = 10_000;
+
+/**
+ * @constant {object} V8 GC kind codes from perf_hooks `entry.detail.kind`.
+ * Used to bucket GC events: minor (scavenge) churn is cheap and expected;
+ * major (mark-sweep-compact) collections are what reclaim the long-lived
+ * set, so the heapUsed reading immediately after a MAJOR is the true
+ * "live set" baseline used for leak detection.
+ */
+const GC_KIND = Object.freeze({
+  MINOR: 1, // Scavenge — young generation, frequent, cheap
+  MAJOR: 4, // Mark-Sweep-Compact — old generation, reclaims live set
+  INCREMENTAL: 8, // Incremental marking step
+  WEAKCB: 16, // Weak callback processing
+});
+
+/**
+ * @constant {number} Max post-major-GC heap baselines retained for the leak trend.
+ * One sample per major GC; 120 samples is a long observation window since major
+ * GCs are infrequent in a healthy process.
+ */
+const HEAP_BASELINE_MAX = 120;
+
+/** @constant {number} Max recent GC pause samples retained for recent avg/max/p95. */
+const GC_PAUSE_SAMPLE_MAX = 200;
 
 /**
  * @constant {number} Lowest HTTP status treated as a CLIENT error (4xx).
@@ -59,6 +93,32 @@ function calcPercentile(sorted, pct) {
   if (!sorted.length) return 0;
   const idx = Math.floor(sorted.length * pct);
   return sorted[Math.min(idx, sorted.length - 1)];
+}
+
+// ─── Linear-regression slope helper (leak trend) ────────────────────────────────
+
+/**
+ * Least-squares slope of y over x. Used to turn a series of post-major-GC heap
+ * baselines into a growth rate: a sustained positive slope of the *post-GC*
+ * live set is the canonical memory-leak signature (GC runs but can't reclaim).
+ *
+ * @param {number[]} xs - Independent values (timestamps, ms)
+ * @param {number[]} ys - Dependent values (heapUsed bytes)
+ * @returns {number} Slope in y-units per x-unit (bytes per ms); 0 if undeterminable
+ */
+function linRegSlope(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return 0;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sx += xs[i];
+    sy += ys[i];
+    sxx += xs[i] * xs[i];
+    sxy += xs[i] * ys[i];
+  }
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return 0;
+  return (n * sxy - sx * sy) / denom;
 }
 
 // ─── RED rate helper ──────────────────────────────────────────────────────────
@@ -135,12 +195,36 @@ class MetricsStore {
     /** Last captured system metrics (refreshed every 10 s) */
     this._system = {
       cpu: { user: 0, system: 0 },
-      memory: { heapUsed: 0, heapTotal: 0, rss: 0, external: 0, arrayBuffers: 0 },
+      memory: { heapUsed: 0, heapTotal: 0, heapSizeLimit: HEAP_SIZE_LIMIT, rss: 0, external: 0, arrayBuffers: 0 },
       eventLoopLag: 0,
-      gc: { collections: 0, pauseMs: 0 },
+      gc: {
+        collections: 0, // lifetime total across all kinds (back-compat)
+        pauseMs: 0, // lifetime total pause across all kinds (back-compat)
+        // Per-kind breakdown — minor churn is healthy; rising majors/overhead is not
+        major: { count: 0, pauseMs: 0 },
+        minor: { count: 0, pauseMs: 0 },
+        incremental: { count: 0, pauseMs: 0 },
+        weakcb: { count: 0, pauseMs: 0 },
+        overheadPct: 0, // % of wall-clock time spent paused in GC over the last poll window
+      },
       handles: 0,
       requests: 0,
     };
+
+    /**
+     * Post-major-GC heap baselines for leak detection.
+     * Each entry is the live set immediately after a major (mark-sweep) GC, when
+     * everything reclaimable has been reclaimed. A sustained upward slope here is
+     * the defining signature of a memory leak. Capped at HEAP_BASELINE_MAX.
+     * @type {Array<{ ts: number, heapUsed: number }>}
+     */
+    this._heapBaselines = [];
+
+    /** Recent GC pause durations (ms) for recent avg/max/p95. Capped at GC_PAUSE_SAMPLE_MAX. */
+    this._gcPauses = [];
+
+    /** Running lifetime GC pause total at the previous poll — for overhead delta. */
+    this._prevGcPauseMs = 0;
 
     /** Previous cpuUsage snapshot for delta calculation */
     this._prevCpuUsage = process.cpuUsage();
@@ -178,7 +262,8 @@ class MetricsStore {
       const mem = process.memoryUsage();
       this._system.memory = {
         heapUsed: mem.heapUsed,
-        heapTotal: mem.heapTotal,
+        heapTotal: mem.heapTotal, // committed so far (grows on demand) — not a ceiling
+        heapSizeLimit: HEAP_SIZE_LIMIT, // the real ceiling heapUsed is measured against
         rss: mem.rss,
         external: mem.external,
         arrayBuffers: mem.arrayBuffers ?? 0,
@@ -201,6 +286,15 @@ class MetricsStore {
         typeof process._getActiveRequests === "function"
           ? process._getActiveRequests().length
           : -1;
+
+      // GC overhead — fraction of this poll window spent paused in GC.
+      // > ~5% sustained means the process is spending real time collecting
+      // instead of serving (GC thrashing), the classic under-memory symptom.
+      const gcPauseDelta = this._system.gc.pauseMs - this._prevGcPauseMs;
+      this._prevGcPauseMs = this._system.gc.pauseMs;
+      this._system.gc.overheadPct = Number(
+        ((gcPauseDelta / SYSTEM_POLL_INTERVAL_MS) * 100).toFixed(2),
+      );
     } catch {
       // Non-fatal — metrics may be unavailable in constrained environments
     }
@@ -231,20 +325,107 @@ class MetricsStore {
 
   /**
    * Observe GC performance entries via perf_hooks when available.
-   * Gracefully no-ops on platforms/versions that do not support it.
+   * Buckets each collection by kind, records pause durations for recent stats,
+   * and — after every MAJOR collection — snapshots the post-GC live set as a
+   * leak-detection baseline. Gracefully no-ops where perf_hooks GC is unavailable.
    */
   #startGcObserver() {
     try {
       const obs = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
+          const pauseMs = entry.duration; // keep float precision for overhead math
+          const kind = entry.detail?.kind ?? entry.kind;
+
           this._system.gc.collections++;
-          this._system.gc.pauseMs += Math.round(entry.duration);
+          this._system.gc.pauseMs += pauseMs;
+
+          // Per-kind bucketing
+          const bucket =
+            kind === GC_KIND.MAJOR
+              ? this._system.gc.major
+              : kind === GC_KIND.MINOR
+                ? this._system.gc.minor
+                : kind === GC_KIND.INCREMENTAL
+                  ? this._system.gc.incremental
+                  : this._system.gc.weakcb;
+          bucket.count++;
+          bucket.pauseMs += pauseMs;
+
+          // Recent pause sample (capped)
+          if (this._gcPauses.length >= GC_PAUSE_SAMPLE_MAX) this._gcPauses.shift();
+          this._gcPauses.push(pauseMs);
+
+          // After a MAJOR collection the heap holds only the live set —
+          // the gold-standard baseline for spotting a leak's upward creep.
+          if (kind === GC_KIND.MAJOR) {
+            if (this._heapBaselines.length >= HEAP_BASELINE_MAX) {
+              this._heapBaselines.shift();
+            }
+            this._heapBaselines.push({
+              ts: Date.now(),
+              heapUsed: process.memoryUsage().heapUsed,
+            });
+          }
         }
       });
       obs.observe({ entryTypes: ["gc"] });
     } catch {
       // perf_hooks GC observation not available — skip silently
     }
+  }
+
+  /**
+   * Analyse the post-major-GC heap baselines for a leak signature.
+   *
+   * A leak is a sustained rise in the *post-GC* live set: GC keeps running but
+   * can no longer return memory to the floor. We require a minimum number of
+   * baselines spanning a minimum window before reporting, so warm-up growth and
+   * short bursts never trip it.
+   *
+   * @returns {{
+   *   sampleCount: number,
+   *   windowMs: number,
+   *   growthBytesPerMin: number,
+   *   firstHeapUsed: number,
+   *   lastHeapUsed: number,
+   *   suspected: boolean
+   * }}
+   */
+  #analyzeHeapTrend() {
+    const baselines = this._heapBaselines;
+    const sampleCount = baselines.length;
+    if (sampleCount < 2) {
+      return {
+        sampleCount,
+        windowMs: 0,
+        growthBytesPerMin: 0,
+        firstHeapUsed: baselines[0]?.heapUsed ?? 0,
+        lastHeapUsed: baselines[0]?.heapUsed ?? 0,
+        suspected: false,
+      };
+    }
+    const xs = baselines.map((b) => b.ts);
+    const ys = baselines.map((b) => b.heapUsed);
+    const slopePerMs = linRegSlope(xs, ys);
+    const growthBytesPerMin = Math.round(slopePerMs * 60_000);
+    const windowMs = xs[xs.length - 1] - xs[0];
+    const firstHeapUsed = ys[0];
+    const lastHeapUsed = ys[ys.length - 1];
+
+    return {
+      sampleCount,
+      windowMs,
+      growthBytesPerMin,
+      firstHeapUsed,
+      lastHeapUsed,
+      // Heuristic only — flagged when enough majors over a long-enough window
+      // show consistent upward live-set growth. Consumers decide severity.
+      suspected:
+        sampleCount >= 8 &&
+        windowMs >= 5 * 60_000 &&
+        growthBytesPerMin > 512 * 1024 && // > 0.5 MB/min sustained
+        lastHeapUsed > firstHeapUsed * 1.25, // and ≥ 25% above the starting floor
+    };
   }
 
   // ========================================
@@ -415,6 +596,23 @@ class MetricsStore {
       };
     }
 
+    // Recent GC pause stats (windowed, vs the lifetime totals in gc.*)
+    const sortedPauses = [...this._gcPauses].sort((a, b) => a - b);
+    const recentGc = {
+      sampleCount: sortedPauses.length,
+      avgPauseMs: sortedPauses.length
+        ? Number(
+            (sortedPauses.reduce((s, v) => s + v, 0) / sortedPauses.length).toFixed(2),
+          )
+        : 0,
+      maxPauseMs: sortedPauses.length
+        ? Number(sortedPauses[sortedPauses.length - 1].toFixed(2))
+        : 0,
+      p95PauseMs: Number(calcPercentile(sortedPauses, 0.95).toFixed(2)),
+    };
+
+    const gc = this._system.gc;
+
     return {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
@@ -423,7 +621,18 @@ class MetricsStore {
         cpu: { ...this._system.cpu },
         memory: { ...this._system.memory },
         eventLoopLag: this._system.eventLoopLag,
-        gc: { ...this._system.gc },
+        gc: {
+          collections: gc.collections,
+          pauseMs: Math.round(gc.pauseMs),
+          overheadPct: gc.overheadPct,
+          major: { ...gc.major },
+          minor: { ...gc.minor },
+          incremental: { ...gc.incremental },
+          weakcb: { ...gc.weakcb },
+          recent: recentGc,
+        },
+        // Post-major-GC live-set trend — the leak detector
+        memoryTrend: this.#analyzeHeapTrend(),
         handles: this._system.handles,
         requests: this._system.requests,
       },
@@ -459,6 +668,9 @@ module.exports = {
   MetricsStore,
   metricsStore,
   computeRates,
+  calcPercentile,
+  linRegSlope,
+  GC_KIND,
   CLIENT_ERROR_MIN_STATUS,
   SERVER_ERROR_MIN_STATUS,
 };

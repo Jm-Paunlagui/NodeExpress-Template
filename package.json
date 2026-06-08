@@ -24,6 +24,8 @@
         "test:security": "mocha --file test/server/setup.js \"test/server/security/**/*.test.js\" --timeout 30000 --exit",
         "test:performance": "mocha --file test/server/setup.js \"test/server/performance/**/*.test.js\" --timeout 60000 --exit",
         "test:reliability": "mocha --file test/server/setup.js \"test/server/reliability/**/*.test.js\" --timeout 60000 --exit",
+        "test:chaos": "mocha --file test/server/setup.js \"test/server/chaos/**/*.test.js\" --timeout 60000 --exit",
+        "test:metrics": "mocha --file test/server/setup.js \"test/server/unit/middleware/metricsStore*.test.js\" \"test/server/unit/services/metricsService.test.js\" \"test/server/integration/metrics.test.js\" \"test/server/chaos/metrics-chaos.test.js\" --timeout 30000 --exit",
         "test:summary": "mocha --file test/server/setup.js \"test/server/**/*.test.js\" --timeout 30000 --exit --recursive --reporter min"
     },
     "dependencies": {
