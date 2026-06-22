@@ -26,6 +26,7 @@ const path = require("path");
 const { getConnectionConfig, getConnectionNames } = require("../database");
 const { logger } = require("../../utils/logger");
 const { oracleMessages } = require("../../constants/messages");
+const { metricsStore } = require("../../middleware/metrics");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 1 — Oracle client environment  (was: oracleEnvironment.js)
@@ -226,6 +227,25 @@ class PoolHealthMonitor {
             meta.healthy = true;
             meta.lastCheck = new Date();
             meta.consecutiveFailures = 0;
+
+            // Push pool utilization into MetricsStore (push model — avoids require cycle).
+            // utilizationPct = connectionsInUse / connectionsOpen * 100 (open is committed capacity).
+            try {
+                const inUse = pool.connectionsInUse ?? 0;
+                const open = pool.connectionsOpen ?? 0;
+                const poolMax = pool.poolMax ?? 0;
+                const utilizationPct = open > 0
+                    ? Number(((inUse / open) * 100).toFixed(1))
+                    : 0;
+                metricsStore.updateOraclePoolStats(name, {
+                    connectionsInUse: inUse,
+                    connectionsOpen: open,
+                    poolMax,
+                    utilizationPct,
+                });
+            } catch {
+                // Non-fatal — pool stat push must never interrupt the health check
+            }
         } catch {
             meta.consecutiveFailures++;
             meta.lastCheck = new Date();

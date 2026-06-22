@@ -44,6 +44,9 @@ const FRONTEND_VITALS_MAX = 500;
 /** @constant {number} System metrics polling interval in milliseconds */
 const SYSTEM_POLL_INTERVAL_MS = 10_000;
 
+/** @constant {number} Number of one-minute throughput buckets retained */
+const THROUGHPUT_BUCKET_COUNT = 60;
+
 /**
  * @constant {object} V8 GC kind codes from perf_hooks `entry.detail.kind`.
  * Used to bucket GC events: minor (scavenge) churn is cheap and expected;
@@ -175,10 +178,21 @@ class MetricsStore {
 
     /**
      * Oracle pool stats.
-     * Key: poolName, Value: { queryCount, errorCount, totalMs, durations: number[] }
-     * @type {Map<string, { queryCount: number, errorCount: number, totalMs: number, durations: number[] }>}
+     * Key: poolName, Value: { queryCount, errorCount, totalMs, durations: number[], connectionsInUse, connectionsOpen, poolMax, utilizationPct }
+     * @type {Map<string, { queryCount: number, errorCount: number, totalMs: number, durations: number[], connectionsInUse: number, connectionsOpen: number, poolMax: number, utilizationPct: number }>}
      */
     this._oracle = new Map();
+
+    /**
+     * Fixed array of 60 one-minute throughput buckets.
+     * Each bucket: { minuteTs: number (floor-minute epoch ms), count: number, serverErrors: number }
+     * The "current" bucket is always at index 0; older buckets follow in reverse-chronological order.
+     * @type {Array<{ minuteTs: number, count: number, serverErrors: number }>}
+     */
+    this._throughputBuckets = [];
+
+    /** Epoch-ms timestamp of the current (active) throughput minute bucket */
+    this._currentBucketTs = MetricsStore._floorMinute(Date.now());
 
     /**
      * Frontend vitals FIFO (max FRONTEND_VITALS_MAX entries).
@@ -235,16 +249,31 @@ class MetricsStore {
   }
 
   // ========================================
+  // PRIVATE STATIC HELPERS
+  // ========================================
+
+  /**
+   * Round a timestamp down to the start of its UTC minute.
+   * @param {number} nowMs - Epoch milliseconds
+   * @returns {number} Floor-minute epoch ms
+   */
+  static _floorMinute(nowMs) {
+    return nowMs - (nowMs % 60_000);
+  }
+
+  // ========================================
   // PRIVATE BACKGROUND PROBES
   // ========================================
 
   /**
    * Poll system metrics every SYSTEM_POLL_INTERVAL_MS milliseconds.
+   * Also rolls throughput buckets so stale minutes are filled with zeroes.
    * Unref'd so it does not prevent process exit.
    */
   #startSystemPoller() {
     const interval = setInterval(() => {
       this.#collectSystemMetrics();
+      this.#rollThroughputBuckets();
     }, SYSTEM_POLL_INTERVAL_MS);
 
     if (typeof interval.unref === "function") interval.unref();
@@ -272,9 +301,15 @@ class MetricsStore {
       // Delta CPU usage since last poll
       const currentCpu = process.cpuUsage(this._prevCpuUsage);
       this._prevCpuUsage = process.cpuUsage();
+      const userMs = Math.round(currentCpu.user / 1000);   // microseconds → ms
+      const sysMs = Math.round(currentCpu.system / 1000);
       this._system.cpu = {
-        user: Math.round(currentCpu.user / 1000),   // microseconds → ms
-        system: Math.round(currentCpu.system / 1000),
+        user: userMs,
+        system: sysMs,
+        // Percentage of the poll window spent in user/system CPU mode.
+        // Capped at 100 to guard against clock skew and burst measurements.
+        userPct: Number(Math.min((userMs / SYSTEM_POLL_INTERVAL_MS) * 100, 100).toFixed(1)),
+        systemPct: Number(Math.min((sysMs / SYSTEM_POLL_INTERVAL_MS) * 100, 100).toFixed(1)),
       };
 
       // Active handles and requests (internal V8 metrics)
@@ -298,6 +333,30 @@ class MetricsStore {
     } catch {
       // Non-fatal — metrics may be unavailable in constrained environments
     }
+  }
+
+  /**
+   * Roll throughput buckets forward if one or more minutes have passed since
+   * the last write. Empty minutes are filled with zero-count sentinel entries
+   * so the frontend always receives a complete 60-bucket window.
+   *
+   * Called by the system poller on every tick. Also called by recordRequest()
+   * inline so the current bucket is always correct even between poll ticks.
+   */
+  #rollThroughputBuckets() {
+    const nowMinute = MetricsStore._floorMinute(Date.now());
+    if (nowMinute <= this._currentBucketTs) return; // still in the same minute
+
+    // Insert zero-count buckets for every elapsed minute we did not record in
+    const minutesElapsed = Math.round((nowMinute - this._currentBucketTs) / 60_000);
+    for (let m = 1; m <= minutesElapsed; m++) {
+      const gapTs = this._currentBucketTs + m * 60_000;
+      this._throughputBuckets.unshift({ minuteTs: gapTs, count: 0, serverErrors: 0 });
+      if (this._throughputBuckets.length > THROUGHPUT_BUCKET_COUNT) {
+        this._throughputBuckets.pop();
+      }
+    }
+    this._currentBucketTs = nowMinute;
   }
 
   /**
@@ -479,6 +538,16 @@ class MetricsStore {
     if (isServerError) entry.serverErrorCount++;
     if (isClientError) entry.clientErrorCount++;
     this.#pushRing(entry.durations, durationMs);
+
+    // ── Throughput bucket write ──────────────────────────────────────────────
+    // Roll forward if we have crossed a minute boundary since the last write.
+    this.#rollThroughputBuckets();
+    // The current bucket is always at index 0.
+    if (this._throughputBuckets.length === 0) {
+      this._throughputBuckets.push({ minuteTs: this._currentBucketTs, count: 0, serverErrors: 0 });
+    }
+    this._throughputBuckets[0].count++;
+    if (isServerError) this._throughputBuckets[0].serverErrors++;
   }
 
   /**
@@ -499,6 +568,29 @@ class MetricsStore {
     entry.totalMs += durationMs;
     if (!success) entry.errorCount++;
     this.#pushRing(entry.durations, durationMs);
+  }
+
+  /**
+   * Push Oracle pool utilization stats from the PoolHealthMonitor into the
+   * metrics store. Called on each health-check tick (push model) to avoid a
+   * require cycle between oracle.js and MetricsStore.
+   *
+   * Initialises a pool entry if one does not yet exist (e.g. pool created but
+   * no queries have run yet).
+   *
+   * @param {string} poolName - Named pool key (e.g. "userAccount")
+   * @param {{ connectionsInUse: number, connectionsOpen: number, poolMax: number, utilizationPct: number }} stats
+   */
+  updateOraclePoolStats(poolName, stats) {
+    let entry = this._oracle.get(poolName);
+    if (!entry) {
+      entry = { queryCount: 0, errorCount: 0, totalMs: 0, durations: [] };
+      this._oracle.set(poolName, entry);
+    }
+    entry.connectionsInUse = stats.connectionsInUse ?? 0;
+    entry.connectionsOpen = stats.connectionsOpen ?? 0;
+    entry.poolMax = stats.poolMax ?? 0;
+    entry.utilizationPct = stats.utilizationPct ?? 0;
   }
 
   /**
@@ -545,8 +637,9 @@ class MetricsStore {
    *   timestamp: string,
    *   uptime: number,
    *   red: Object.<string, { count: number, clientErrorCount: number, serverErrorCount: number, errorRate: number, clientErrorRate: number, availability: number, p50: number, p95: number, p99: number, avgMs: number }>,
-   *   system: { cpu: object, memory: object, eventLoopLag: number, gc: object, handles: number, requests: number },
-   *   dependencies: { oracle: Object.<string, { queryCount: number, errorCount: number, avgMs: number, p95Ms: number }> },
+   *   throughput: { currentReqPerMin: number, buckets: Array<{ minuteTs: number, count: number, serverErrors: number }> },
+   *   system: { cpu: { user: number, system: number, userPct: number, systemPct: number }, memory: object, eventLoopLag: number, gc: object, handles: number, requests: number },
+   *   dependencies: { oracle: Object.<string, { queryCount: number, errorCount: number, avgMs: number, p95Ms: number, connectionsInUse: number|null, connectionsOpen: number|null, poolMax: number|null, utilizationPct: number|null }> },
    *   totals: { requestsTotal: number, clientErrorsTotal: number, serverErrorsTotal: number, errorRate: number, clientErrorRate: number, availability: number },
    *   frontendVitals: Array,
    *   frontendErrors: Array
@@ -592,9 +685,23 @@ class MetricsStore {
           ? Math.round(entry.totalMs / entry.queryCount)
           : 0,
         p95Ms: calcPercentile(sorted, 0.95),
-        poolUtilization: null, // Placeholder — pool utilization requires OracleDB pool stats API
+        // Pool utilization — populated by updateOraclePoolStats() on each health-check tick.
+        // Null until the first PoolHealthMonitor tick completes after startup.
+        connectionsInUse: entry.connectionsInUse ?? null,
+        connectionsOpen: entry.connectionsOpen ?? null,
+        poolMax: entry.poolMax ?? null,
+        utilizationPct: entry.utilizationPct ?? null,
       };
     }
+
+    // Throughput — current req/min from the active bucket + historical buckets
+    const currentReqPerMin = this._throughputBuckets.length > 0
+      ? this._throughputBuckets[0].count
+      : 0;
+    const throughput = {
+      currentReqPerMin,
+      buckets: [...this._throughputBuckets],
+    };
 
     // Recent GC pause stats (windowed, vs the lifetime totals in gc.*)
     const sortedPauses = [...this._gcPauses].sort((a, b) => a - b);
@@ -617,6 +724,7 @@ class MetricsStore {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       red,
+      throughput,
       system: {
         cpu: { ...this._system.cpu },
         memory: { ...this._system.memory },
